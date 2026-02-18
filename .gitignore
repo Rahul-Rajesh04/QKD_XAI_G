@@ -1,0 +1,6 @@
+# Ignore heavy folders
+Datasets/
+Models/
+__pycache__/
+*.pkl
+*.csv

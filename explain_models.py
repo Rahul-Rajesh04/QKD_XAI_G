@@ -1,147 +1,122 @@
 import pandas as pd
 import numpy as np
-import joblib
-import os
+import pickle
 import shap
-import lime
-import lime.lime_tabular
 import matplotlib.pyplot as plt
+import os
 
-# Project configuration
-DATA_PATH = "Datasets/Processed/"
-MODEL_PATH = "Models/"
-RESULTS_PATH = "Results/"
+# --- CONFIGURATION ---
+FEATURES = [
+    'qber_overall', 
+    'qber_rectilinear', 
+    'qber_diagonal',
+    'detector_voltage', 
+    'timing_jitter', 
+    'photon_count_rate'
+]
 
-# Create results directory if it doesn't exist
-os.makedirs(RESULTS_PATH, exist_ok=True)
+# Define where to save the images
+RESULTS_DIR = "Results/Forensic_Evidence"
 
-def load_artifacts():
-    """
-    Load the processed datasets and the pre-trained models from disk.
-    """
-    print("Loading artifacts...")
+def explain_predictions():
+    print("--- Phase 4: XAI Explanation (High-Res & Organized) ---")
     
-    # Load datasets
-    df_normal = pd.read_csv(os.path.join(DATA_PATH, "normal_data.csv"))
-    df_attack = pd.read_csv(os.path.join(DATA_PATH, "attack_intercept.csv"))
+    # 1. Load the Model
+    model_path = "Models/rf_model_v3.pkl"
+    if not os.path.exists(model_path):
+        print("Error: Model not found! Run model_training.py first.")
+        return
+        
+    with open(model_path, "rb") as f:
+        rf_model = pickle.load(f)
     
-    # Load trained models
-    rf_model = joblib.load(os.path.join(MODEL_PATH, "random_forest.pkl"))
-    svm_model = joblib.load(os.path.join(MODEL_PATH, "one_class_svm.pkl"))
+    print("Initializing SHAP Explainer...")
+    explainer = shap.TreeExplainer(rf_model)
     
-    return df_normal, df_attack, rf_model, svm_model
+    # Ensure Results folder exists
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    print(f" -> Saving all evidence to: {RESULTS_DIR}/")
+    
+    # --- HELPER: ROBUST PLOTTER ---
+    def generate_plot(attack_name, csv_filename, clean_name):
+        print(f"\nExplaining {attack_name}...")
+        data_path = f"Datasets/Processed/{csv_filename}"
+        
+        if not os.path.exists(data_path):
+            print(f"Skipping {attack_name} (File not found)")
+            return
 
-def generate_shap_explanations(model, df_normal, df_attack):
-    """
-    Generate SHAP plots for the Random Forest Classifier.
-    """
-    print("\n[SHAP] Generating explanations for Random Forest...")
-    
-    features = ['qber_rolling', 'basis_match', 'error']
-    
-    # Create background dataset
-    background_data = pd.concat([df_normal[features].sample(50), df_attack[features].sample(50)])
-    
-    explainer = shap.TreeExplainer(model)
-    
-    # --- 1. Global Feature Importance ---
-    print(" -> Generating Summary Plot...")
-    
-    # Calculate SHAP values for a larger summary set
-    summary_data = pd.concat([df_normal[features].sample(100), df_attack[features].sample(100)])
-    shap_values = explainer.shap_values(summary_data)
-    
-    # --- FIX: Handle different SHAP return types (List vs Array) ---
-    if isinstance(shap_values, list):
-        # Old SHAP: Returns list [Class0, Class1]
-        attack_shap_values = shap_values[1]
-    elif len(np.array(shap_values).shape) == 3:
-        # New SHAP: Returns array (Samples, Features, Classes)
-        attack_shap_values = shap_values[:, :, 1]
-    else:
-        # Fallback (Binary model returning single matrix)
-        attack_shap_values = shap_values
+        # Load Data
+        df = pd.read_csv(data_path)
+        # Sample 100 rows for speed
+        X_sample = df[FEATURES].sample(n=100, random_state=42)
+        
+        # Get SHAP values
+        print(" -> Calculating SHAP values...")
+        shap_values = explainer.shap_values(X_sample, check_additivity=False)
+        
+        # Identify the correct index for the attack class
+        class_names = rf_model.classes_
+        try:
+            target_index = np.where(class_names == attack_name)[0][0]
+        except IndexError:
+            print(f"Error: Class '{attack_name}' not found!")
+            return
 
-    plt.figure()
-    shap.summary_plot(attack_shap_values, summary_data, show=False)
-    plt.savefig(os.path.join(RESULTS_PATH, "shap_global_importance.png"), bbox_inches='tight')
-    plt.close()
-    print(" -> Saved: Results/shap_global_importance.png")
+        # Handle SHAP data formats (List vs Array)
+        shap_values_target = None
+        if isinstance(shap_values, list):
+            shap_values_target = shap_values[target_index]
+        elif isinstance(shap_values, np.ndarray) and len(shap_values.shape) == 3:
+            if shap_values.shape[0] == len(X_sample): 
+                shap_values_target = shap_values[:, :, target_index]
+            else:
+                shap_values_target = shap_values[target_index]
+        else:
+            shap_values_target = shap_values[target_index]
 
-    # --- 2. Local Explanation (Force Plot) ---
-    print(" -> Generating Attack Explanation...")
-    
-    # Select a high-confidence attack sample (keep as DataFrame for shape consistency)
-    attack_sample = df_attack[df_attack['qber_rolling'] > 0.20][features].iloc[[0]]
-    
-    # Calculate SHAP values for this single instance
-    single_shap_values = explainer.shap_values(attack_sample)
-    
-    # Fix for single instance slicing
-    if isinstance(single_shap_values, list):
-        single_val_plot = single_shap_values[1][0]
-    elif len(np.array(single_shap_values).shape) == 3:
-        single_val_plot = single_shap_values[0, :, 1]
-    else:
-        single_val_plot = single_shap_values[0]
-
-    # Generate force plot
-    p = shap.force_plot(
-        explainer.expected_value[1], 
-        single_val_plot, 
-        attack_sample.iloc[0], 
-        matplotlib=True, 
-        show=False
-    )
-    plt.savefig(os.path.join(RESULTS_PATH, "shap_single_attack.png"), bbox_inches='tight')
-    plt.close()
-    print(" -> Saved: Results/shap_single_attack.png")
-
-def generate_lime_explanations(model, df_normal, df_attack):
-    """
-    Generate LIME explanation for the One-Class SVM.
-    """
-    print("\n[LIME] Generating explanations for One-Class SVM...")
-    
-    features = ['qber_rolling', 'basis_match', 'error']
-    
-    # LIME needs training data statistics
-    X_train_summary = df_normal[features].sample(1000).values
-    
-    explainer = lime.lime_tabular.LimeTabularExplainer(
-        training_data=X_train_summary,
-        feature_names=features,
-        class_names=['Normal', 'Anomaly'], 
-        mode='classification'
-    )
-    
-    def svm_predict_proba(data):
-        decision = model.decision_function(data)
-        proba_normal = 1 / (1 + np.exp(-decision)) 
-        return np.column_stack([proba_normal, 1 - proba_normal])
-
-    # Select an anomaly instance
-    attack_sample = df_attack[df_attack['qber_rolling'] > 0.20][features].iloc[0].values
-    
-    print(" -> Explaining a detected anomaly...")
-    try:
-        exp = explainer.explain_instance(
-            attack_sample, 
-            svm_predict_proba, 
-            num_features=3
+        # --- PLOT 1: Executive Summary (Bar Chart) ---
+        plt.figure(figsize=(10, 6))
+        shap.summary_plot(
+            shap_values_target, 
+            X_sample, 
+            feature_names=FEATURES,
+            show=False,
+            plot_type="bar"
         )
-        exp.save_to_file(os.path.join(RESULTS_PATH, "lime_svm_explanation.html"))
-        print(" -> Saved: Results/lime_svm_explanation.html")
-    except Exception as e:
-        print(f"LIME Error (skipping plot): {e}")
+        plt.title(f"Primary Indicators: {clean_name}", fontsize=14)
+        plt.tight_layout()
+        
+        bar_filename = f"Evidence_{clean_name}_Summary.png"
+        save_path = os.path.join(RESULTS_DIR, bar_filename)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f" -> Saved summary to '{save_path}'")
+        plt.close()
 
-def main():
-    df_normal, df_attack, rf_model, svm_model = load_artifacts()
-    
-    generate_shap_explanations(rf_model, df_normal, df_attack)
-    generate_lime_explanations(svm_model, df_normal, df_attack)
-    
+        # --- PLOT 2: Technical Deep-Dive (Beeswarm) ---
+        plt.figure(figsize=(12, 8))
+        shap.summary_plot(
+            shap_values_target, 
+            X_sample, 
+            feature_names=FEATURES,
+            show=False,
+            plot_type="dot"
+        )
+        plt.title(f"Forensic Fingerprint: {clean_name}", fontsize=14)
+        plt.tight_layout()
+        
+        dot_filename = f"Evidence_{clean_name}_Detailed.png"
+        save_path = os.path.join(RESULTS_DIR, dot_filename)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f" -> Saved detailed plot to '{save_path}'")
+        plt.close()
+
+    # --- RUN EXPLANATIONS ---
+    # We use "Clean Names" for the files so they look professional
+    generate_plot("attack_timeshift", "attack_timeshift.csv", "TimeShift_Attack")
+    generate_plot("attack_blinding", "attack_blinding.csv", "Blinding_Attack")
+
     print("\n--- XAI Generation Complete ---")
 
 if __name__ == "__main__":
-    main()
+    explain_predictions()
