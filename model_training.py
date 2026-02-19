@@ -82,7 +82,7 @@ def train_models():
         n_estimators=100, 
         min_samples_leaf=10, # Add this to prevent over-fitting to specific QBER values
         n_jobs=-1, 
-        verbose=2, 
+        verbose=0, 
         random_state=42
     )
     rf_model.fit(X_train, y_train)
