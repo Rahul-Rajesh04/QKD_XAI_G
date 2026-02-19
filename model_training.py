@@ -77,7 +77,14 @@ def train_models():
     print("\nTraining Random Forest (Multi-Class Classifier)...")
     
     # UPDATED: n_jobs=-1 uses ALL cores. verbose=2 shows progress.
-    rf_model = RandomForestClassifier(n_estimators=100, n_jobs=-1, verbose=2, random_state=42)
+    # Change from default to a more robust leaf size
+    rf_model = RandomForestClassifier(
+        n_estimators=100, 
+        min_samples_leaf=10, # Add this to prevent over-fitting to specific QBER values
+        n_jobs=-1, 
+        verbose=2, 
+        random_state=42
+    )
     rf_model.fit(X_train, y_train)
     
     # Evaluate
