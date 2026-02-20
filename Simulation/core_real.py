@@ -1,7 +1,8 @@
+__author__ = "Rahul Rajesh 2360445"
+
 import numpy as np
 from scipy.linalg import logm
 
-# --- QUANTUM OPERATORS ---
 I = np.array([[1, 0], [0, 1]], dtype=complex)
 X = np.array([[0, 1], [1, 0]], dtype=complex)
 Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
@@ -11,10 +12,10 @@ H = (1 / np.sqrt(2)) * np.array([[1, 1], [1, -1]], dtype=complex)
 class QState:
     def __init__(self, matrix=None):
         if matrix is None:
-            self.rho = np.array([[1, 0], [0, 0]], dtype=complex) # Default |H>
+            self.rho = np.array([[1, 0], [0, 0]], dtype=complex)
         else:
             self.rho = np.array(matrix, dtype=complex)
-            self.rho = self.rho / np.trace(self.rho) # Normalize
+            self.rho = self.rho / np.trace(self.rho)
 
     @classmethod
     def from_label(cls, label):
@@ -29,7 +30,6 @@ class QState:
         self.rho = U @ self.rho @ U.conj().T
 
     def apply_depolarizing_noise(self, p):
-        # Mixed state: (1-p)*rho + p*(Identity/2)
         noise = 0.5 * I
         self.rho = (1 - p) * self.rho + p * noise
 
@@ -45,15 +45,12 @@ class QState:
         else:
             raise ValueError("Unknown basis")
 
-        # Born Rule
         prob_0 = np.real(np.trace(P0 @ self.rho))
         prob_1 = np.real(np.trace(P1 @ self.rho))
         
-        # Normalize probabilities
         total = prob_0 + prob_1
         prob_0, prob_1 = prob_0/total, prob_1/total
 
-        # Collapse
         result = np.random.choice([0, 1], p=[prob_0, prob_1])
         if result == 0:
             self.rho = P0 / np.trace(P0 @ self.rho)
@@ -62,9 +59,8 @@ class QState:
         return result
 
     def get_entropy(self):
-        # Von Neumann Entropy: -Tr(rho * log(rho))
         evals = np.linalg.eigvalsh(self.rho)
-        evals = evals[evals > 1e-10] # Avoid log(0)
+        evals = evals[evals > 1e-10]
         return -np.sum(evals * np.log2(evals))
 
     def get_fidelity(self, target_label):

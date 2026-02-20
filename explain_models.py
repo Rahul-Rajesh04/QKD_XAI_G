@@ -1,3 +1,5 @@
+__author__ = "Rahul Rajesh 2360445"
+
 import pandas as pd
 import numpy as np
 import pickle
@@ -5,7 +7,6 @@ import shap
 import matplotlib.pyplot as plt
 import os
 
-# --- CONFIGURATION ---
 FEATURES = [
     'qber_overall', 
     'qber_rectilinear', 
@@ -15,13 +16,11 @@ FEATURES = [
     'photon_count_rate'
 ]
 
-# Define where to save the images
 RESULTS_DIR = "Results/Forensic_Evidence"
 
 def explain_predictions():
     print("--- Phase 4: XAI Explanation (High-Res & Organized) ---")
     
-    # 1. Load the Model
     model_path = "Models/rf_model_v3.pkl"
     if not os.path.exists(model_path):
         print("Error: Model not found! Run model_training.py first.")
@@ -33,11 +32,9 @@ def explain_predictions():
     print("Initializing SHAP Explainer...")
     explainer = shap.TreeExplainer(rf_model)
     
-    # Ensure Results folder exists
     os.makedirs(RESULTS_DIR, exist_ok=True)
     print(f" -> Saving all evidence to: {RESULTS_DIR}/")
     
-    # --- HELPER: ROBUST PLOTTER ---
     def generate_plot(attack_name, csv_filename, clean_name):
         print(f"\nExplaining {attack_name}...")
         data_path = f"Datasets/Processed/{csv_filename}"
@@ -46,16 +43,12 @@ def explain_predictions():
             print(f"Skipping {attack_name} (File not found)")
             return
 
-        # Load Data
         df = pd.read_csv(data_path)
-        # Sample 100 rows for speed
         X_sample = df[FEATURES].sample(n=100, random_state=42)
         
-        # Get SHAP values
         print(" -> Calculating SHAP values...")
         shap_values = explainer.shap_values(X_sample, check_additivity=False)
         
-        # Identify the correct index for the attack class
         class_names = rf_model.classes_
         try:
             target_index = np.where(class_names == attack_name)[0][0]
@@ -63,7 +56,6 @@ def explain_predictions():
             print(f"Error: Class '{attack_name}' not found!")
             return
 
-        # Handle SHAP data formats (List vs Array)
         shap_values_target = None
         if isinstance(shap_values, list):
             shap_values_target = shap_values[target_index]
@@ -75,7 +67,6 @@ def explain_predictions():
         else:
             shap_values_target = shap_values[target_index]
 
-        # --- PLOT 1: Executive Summary (Bar Chart) ---
         plt.figure(figsize=(10, 6))
         shap.summary_plot(
             shap_values_target, 
@@ -93,7 +84,6 @@ def explain_predictions():
         print(f" -> Saved summary to '{save_path}'")
         plt.close()
 
-        # --- PLOT 2: Technical Deep-Dive (Beeswarm) ---
         plt.figure(figsize=(12, 8))
         shap.summary_plot(
             shap_values_target, 
@@ -111,8 +101,6 @@ def explain_predictions():
         print(f" -> Saved detailed plot to '{save_path}'")
         plt.close()
 
-    # --- RUN EXPLANATIONS ---
-    # We use "Clean Names" for the files so they look professional
     generate_plot("attack_timeshift", "attack_timeshift.csv", "TimeShift_Attack")
     generate_plot("attack_blinding", "attack_blinding.csv", "Blinding_Attack")
 

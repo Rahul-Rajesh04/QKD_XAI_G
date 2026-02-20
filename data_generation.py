@@ -1,51 +1,35 @@
+__author__ = "Rahul Rajesh 2360445"
+
 import pandas as pd
 import numpy as np
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor
 
-# --- PATH SETUP ---
 sys.path.append(os.path.join(os.path.dirname(__file__), 'Simulation'))
 
 import manager as expt
 import noise as noisy
 import attacker as eve
 
-# --- CONFIGURATION ---
 DATASET_SIZE = 1_000_000
 OUTPUT_DIR = "Datasets/Raw"
 
 def generate_hardware_vitals(n, label):
-    """
-    Vectorized generation of hardware metrics matches components.py Physics.
-    """
-    # 1. Base Distributions (Normal Operation)
-    # Voltage: ~3.3V (Geiger Mode)
-    # Jitter: ~1.2ns (Thermal Noise)
-    # Efficiency: ~25%
     voltage = np.random.normal(3.3, 0.2, n) 
     jitter = np.random.normal(1.2, 0.2, n)
     counts = np.random.normal(0.25, 0.02, n)
 
-    # 2. Attack-Specific Overrides
     if label == "attack_blinding":
-        # Blinding: 
-        # - Voltage Spikes to >8V (Saturation)
-        # - Jitter drops to ~0.1ns (CW Laser = No Jitter)
         voltage = np.random.normal(9.0, 0.1, n)
         jitter = np.random.normal(0.1, 0.01, n)
-        counts = np.random.normal(0.99, 0.005, n) # Saturation counts
+        counts = np.random.normal(0.99, 0.005, n) 
         
     elif label == "attack_timeshift":
-        # Time-Shift:
-        # - Voltage is Normal (~3.3V)
-        # - Jitter is suspicious (~0.05ns)
-        # - Counts drop (~15%)
         voltage = np.random.normal(3.3, 0.2, n)
         jitter = np.random.normal(0.05, 0.01, n)
         counts = np.random.normal(0.15, 0.02, n)
 
-    # Clip values to realistic physical bounds
     voltage = np.maximum(0, voltage)
     jitter = np.maximum(0, jitter)
     counts = np.clip(counts, 0, 1)
@@ -56,9 +40,7 @@ def run_simulation_task(task_config):
     label, filename, sim_class, kwargs = task_config
     print(f"[{label}] Starting generation of {DATASET_SIZE} events...")
 
-    # --- SIMULATION LOGIC ---
     if label == "normal":
-        # Robust Normal Training (Variable Noise 1% to 5%)
         dfs = []
         chunk_size = DATASET_SIZE // 5
         noise_levels = [0.01, 0.02, 0.03, 0.04, 0.05]
@@ -74,7 +56,7 @@ def run_simulation_task(task_config):
                 'bob_basis': experiment.bob.bases,
                 'bob_bit': experiment.bob.measured_bits,
             }
-            # Derived & Hardware
+            
             chunk_data['basis_match'] = (chunk_data['alice_basis'] == chunk_data['bob_basis']).astype(int)
             chunk_data['error'] = (chunk_data['alice_bit'] != chunk_data['bob_bit']).astype(int)
             
@@ -88,7 +70,6 @@ def run_simulation_task(task_config):
         df = pd.concat(dfs, ignore_index=True)
     
     else:
-        # Standard logic for attacks
         experiment = sim_class(DATASET_SIZE, **kwargs)
         experiment.execute()
         
@@ -102,7 +83,6 @@ def run_simulation_task(task_config):
         data['basis_match'] = (data['alice_basis'] == data['bob_basis']).astype(int)
         data['error'] = (data['alice_bit'] != data['bob_bit']).astype(int)
         
-        # Spoofing for Blinding/TimeShift (Eve matches Alice)
         if label in ["attack_blinding", "attack_timeshift"]:
             mask_clean = np.random.random(DATASET_SIZE) > 0.01
             data['error'][mask_clean] = 0
@@ -115,7 +95,6 @@ def run_simulation_task(task_config):
         
         df = pd.DataFrame(data)
 
-    # Save
     df['label'] = label
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     out_path = os.path.join(OUTPUT_DIR, filename)
