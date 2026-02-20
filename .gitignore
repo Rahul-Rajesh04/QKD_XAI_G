@@ -4,3 +4,23 @@ Models/
 __pycache__/
 *.pkl
 *.csv
+
+# Log files
+logs/*.log
+logs/*.txt
+!logs/.gitkeep
+
+# Generated plots
+Results/Forensic_Evidence/*.png
+
+# Temp debug scripts
+debug_*.py
+run_tests.ps1
+
+# Python cache
+*.py[cod]
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db

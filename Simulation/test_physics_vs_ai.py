@@ -27,50 +27,82 @@ def load_ai_brain():
     print("-> AI Brain Loaded successfully.")
     return model
 
-def run_lab_experiment(label, intensity_mode, attack_mode="none", apply_noise=False):
-    laser = hardware.LaserSource()
-    bob_spd = hardware.APD_Detector()
-    bob_spd.set_attack_mode(attack_mode) 
-    
-    n_pulses = 5000 
-    
-    results = []
-    voltages = []
-    jitters = []
-    
-    for i in range(n_pulses):
-        q_state, flux = laser.emit('H', intensity_mode)
-        
-        if apply_noise:
-             q_state.apply_depolarizing_noise(0.04)
+def run_lab_experiment(label: str, intensity_mode: str, attack_mode: str = "none", apply_noise: bool = False):
+    """
+    Simulate a BB84 key exchange and return the AI feature vector.
 
-        current_time_sim = i * 1e-6 
-        res = bob_spd.detect(q_state, flux, 'rectilinear', current_time_sim)
-        
+    Uses genuinely random Alice/Bob bases so qber_rectilinear and qber_diagonal
+    are computed from independent measurement sets, mirroring data_preprocessing.py.
+    """
+    laser   = hardware.LaserSource()
+    bob_spd = hardware.APD_Detector()
+    bob_spd.set_attack_mode(attack_mode)
+
+    n_pulses = 5000
+
+    alice_bits_l, alice_bases_l = [], []
+    bob_bits_l,   bob_bases_l   = [], []
+    voltages, jitters = [], []
+    received_count = 0
+
+    label_map = {(0, 0): 'H', (1, 0): 'V', (0, 1): 'D', (1, 1): 'A'}
+
+    for i in range(n_pulses):
+        a_bit   = int(np.random.randint(0, 2))
+        a_basis = int(np.random.randint(0, 2))
+
+        q_state, flux = laser.emit(label_map[(a_bit, a_basis)], intensity_mode)
+        if apply_noise:
+            q_state.apply_depolarizing_noise(0.04)
+
+        b_basis   = int(np.random.randint(0, 2))
+        basis_str = 'rectilinear' if b_basis == 0 else 'diagonal'
+
+        # 15 µs > 10 µs APD dead time — ensures count rate matches training distributions
+        current_time_sim = i * 15e-6
+
+        res = bob_spd.detect(q_state, flux, basis_str, current_time_sim)
+
         voltages.append(bob_spd.current_voltage)
         jitters.append(bob_spd.current_jitter)
-        if res is not None:
-            results.append(res)
 
-    avg_voltage = np.mean(voltages)
-    avg_jitter = np.mean(jitters)
-    
-    error_count = sum(r for r in results if r == 1)
-    total_received = len(results)
-    
-    qber = error_count / total_received if total_received > 0 else 0.0
-    count_rate = total_received / n_pulses
+        if res is not None:
+            alice_bits_l.append(a_bit)
+            alice_bases_l.append(a_basis)
+            bob_bits_l.append(res)
+            bob_bases_l.append(b_basis)
+            received_count += 1
+
+    count_rate  = received_count / n_pulses
+    avg_voltage = float(np.mean(voltages))
+    avg_jitter  = float(np.mean(jitters))
+
+    # Sift and compute per-basis QBER (mirrors data_preprocessing.py)
+    ab = np.array(alice_bits_l);  aB = np.array(alice_bases_l)
+    bb = np.array(bob_bits_l);    bB = np.array(bob_bases_l)
+
+    match   = aB == bB
+    error   = (ab != bb) & match
+    is_rect = aB == 0
+    is_diag = aB == 1
+
+    n_sifted  = int(match.sum())
+    qber_o = error.sum()   / n_sifted              if n_sifted > 0 else 0.0
+    qber_r = (error & is_rect).sum() / (match & is_rect).sum() if (match & is_rect).sum() > 0 else 0.0
+    qber_d = (error & is_diag).sum() / (match & is_diag).sum() if (match & is_diag).sum() > 0 else 0.0
 
     ai_input = pd.DataFrame([{
-        'qber_overall': qber,
-        'qber_rectilinear': qber, 
-        'qber_diagonal': qber,    
-        'detector_voltage': avg_voltage,
-        'timing_jitter': avg_jitter,
-        'photon_count_rate': count_rate
+        'qber_overall':      float(qber_o),
+        'qber_rectilinear':  float(qber_r),
+        'qber_diagonal':     float(qber_d),
+        'detector_voltage':  avg_voltage,
+        'timing_jitter':     avg_jitter,
+        'photon_count_rate': count_rate,
     }])
-    
-    return ai_input, qber, avg_voltage, avg_jitter, total_received
+
+    return ai_input, float(qber_o), avg_voltage, avg_jitter, n_sifted
+
+
 
 def main():
     print("\n" + "="*70)
