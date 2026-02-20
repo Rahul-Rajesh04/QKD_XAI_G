@@ -43,7 +43,7 @@ class NoisyBob(bb.Bob):
 class NoisyQuantumChannel(bb.QuantumChannel):
     def transmit(self, state_matrix):
         fluctuation = np.random.uniform(-0.25, 0.25)
-        current_noise_rate = 0.15 * (1 + fluctuation)
+        current_noise_rate = 0.04 * (1 + fluctuation)
         
         n_qubits = state_matrix.shape[1]
         num_errors = int(n_qubits * current_noise_rate)

@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import os
 
-def calculate_v3_features(df, window_size=50):
+def calculate_v3_features(df, window_size=500):
     print("   -> Calculating Micro-Sifting stats...")
     
     df['sifted'] = df['basis_match']
@@ -52,7 +52,7 @@ def process_file(filename):
     print(f"Processing {filename}...")
     df = pd.read_csv(input_path)
     
-    df_processed = calculate_v3_features(df, window_size=100)
+    df_processed = calculate_v3_features(df, window_size=500)
     
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     df_processed.to_csv(output_path, index=False)
