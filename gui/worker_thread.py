@@ -30,7 +30,6 @@ from streams.circular_buffer import EventBuffer
 from inference.ids_engine import IDSEngine, InferenceResult
 from explain_logic import analyze_incident
 
-
 if _PYQT_AVAILABLE:
     class IDSWorker(QThread):
         
@@ -51,7 +50,13 @@ if _PYQT_AVAILABLE:
             self.window_size    = window_size
             self._running       = True
             
-            # Use your existing 'logs' directory
+            self.state_controller = {
+                "active": False, 
+                "attack_mode": "none", 
+                "intensity_mode": "single_photon", 
+                "remaining": 0
+            }
+            
             self._log_dir = os.path.join(_PROJECT_ROOT, "logs")
             os.makedirs(self._log_dir, exist_ok=True)
             self._telemetry_file = os.path.join(self._log_dir, "threat_telemetry.csv")
@@ -59,7 +64,6 @@ if _PYQT_AVAILABLE:
             self._init_telemetry_log()
 
         def _init_telemetry_log(self) -> None:
-            """Initialize the CSV log file with clean headers."""
             if not os.path.exists(self._telemetry_file):
                 with open(self._telemetry_file, mode='w', newline='', encoding='utf-8') as f:
                     writer = csv.writer(f)
@@ -69,12 +73,8 @@ if _PYQT_AVAILABLE:
                     ])
 
         def _log_threat(self, result: InferenceResult, vitals: dict) -> None:
-            """Append a cleanly formatted threat event to the CSV log."""
-            
-            # Clean up the verdict string (removes the problematic em-dash)
             clean_verdict = result.verdict.replace("—", "-")
             
-            # Make the log look trustworthy and professional
             if "ZERO-DAY" in clean_verdict:
                 signature = "Unclassified_Anomaly"
                 confidence = "100.00% (SVM Override)"
@@ -82,7 +82,6 @@ if _PYQT_AVAILABLE:
                 signature = result.rf_prediction
                 confidence = f"{result.rf_confidence * 100:.2f}%"
 
-            # Format the vitals nicely
             v_str = f"{vitals['voltage']:.2f} V"
             j_str = f"{vitals['jitter']:.3f} ns"
             q_str = f"{vitals['qber'] * 100:.2f}%"
@@ -100,6 +99,13 @@ if _PYQT_AVAILABLE:
                     q_str
                 ])
 
+        def inject_attack(self, attack: str, duration_events: int = 1500) -> None:
+            intensity = "blinding" if attack == "blinding" else "single_photon"
+            self.state_controller["attack_mode"] = attack
+            self.state_controller["intensity_mode"] = intensity
+            self.state_controller["remaining"] = duration_events
+            self.state_controller["active"] = True
+
         def run(self) -> None:
             log.info(f"IDSWorker started | attack={self.attack_mode} | intensity={self.intensity_mode}")
             asyncio.run(self._async_pipeline())
@@ -111,18 +117,22 @@ if _PYQT_AVAILABLE:
         async def _async_pipeline(self) -> None:
             engine = IDSEngine()
             buffer = EventBuffer(maxlen=self.window_size)
+            
+            event_counter = 0
 
             async for event in quantum_event_stream(
                 attack_mode    = self.attack_mode,
                 intensity_mode = self.intensity_mode,
                 noise_p        = self.noise_p,
+                state_controller = self.state_controller,
             ):
                 if not self._running:
                     break
 
                 buffer.push(event)
+                event_counter += 1
 
-                if buffer.is_ready:
+                if buffer.is_ready and event_counter % 50 == 0:
                     features = buffer.extract_features()
                     if features is None:
                         continue
@@ -157,4 +167,6 @@ else:
         def start(self) -> None:
             pass
         def stop(self) -> None:
+            pass
+        def inject_attack(self, attack: str, duration_events: int = 1500) -> None:
             pass

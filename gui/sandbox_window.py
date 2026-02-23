@@ -1,10 +1,13 @@
+"""
+gui/sandbox_window.py
+PyQt6 Live-Fire Sandbox - Real-time transient attack injection.
+"""
 __author__ = "Rahul Rajesh 2360445"
 
 import sys
 import os
 import argparse
 import collections
-import csv
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
@@ -20,9 +23,9 @@ try:
         QApplication, QMainWindow, QWidget,
         QVBoxLayout, QHBoxLayout, QLabel,
         QTextEdit, QProgressBar, QSplitter,
-        QFrame, QComboBox, QTabWidget, QPushButton, QMessageBox
+        QFrame, QPushButton, QTabWidget
     )
-    from PyQt6.QtCore import Qt
+    from PyQt6.QtCore import Qt, QTimer
     from PyQt6.QtGui import QFont, QPixmap
     import pyqtgraph as pg        
     _GUI_AVAILABLE = True
@@ -33,7 +36,7 @@ except ImportError as exc:
 if _GUI_AVAILABLE:
     from gui.worker_thread import IDSWorker
 
-    class IDSDashboard(QMainWindow):
+    class SandboxDashboard(QMainWindow):
 
         _HISTORY_LEN: int = 200   
 
@@ -43,18 +46,21 @@ if _GUI_AVAILABLE:
             "critical": ("#3a0d0d", "#ef5350"),   
         }
 
-        def __init__(self, attack_mode: str = "none") -> None:
+        def __init__(self) -> None:
             super().__init__()
-            self.setWindowTitle("QKD Real-Time IDS - Rahul Rajesh 2360445")
+            self.setWindowTitle("QKD Live-Fire Sandbox - Rahul Rajesh 2360445")
             self.resize(1150, 750)
 
             self._qber_history: collections.deque[float] = collections.deque(
                 [0.0] * self._HISTORY_LEN, maxlen=self._HISTORY_LEN
             )
+            
+            self._injection_timer = QTimer()
+            self._injection_timer.setSingleShot(True)
+            self._injection_timer.timeout.connect(self._reset_button_styles)
 
             self._build_ui()
-            self._set_initial_dropdown(attack_mode)
-            self._start_worker(attack_mode)
+            self._start_worker()
 
         def _build_ui(self) -> None:
             self._tabs = QTabWidget()
@@ -64,37 +70,33 @@ if _GUI_AVAILABLE:
             root_layout = QVBoxLayout(telemetry_tab)
             root_layout.setSpacing(8)
 
-            self._status_label = QLabel("⬤  INITIALISING…")
+            self._status_label = QLabel("⬤  SYSTEM SECURE")
             self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._status_label.setFont(QFont("Consolas", 16, QFont.Weight.Bold))
             self._status_label.setFixedHeight(48)
-            self._set_status_style("warning")
+            self._set_status_style("normal")
             root_layout.addWidget(self._status_label)
 
-            control_layout = QHBoxLayout()
-            control_label = QLabel("Active Simulation Mode:")
+            # --- LIVE INJECTION CONTROL PANEL ---
+            control_frame = QFrame()
+            control_frame.setStyleSheet("background-color: #1e1e1e; border: 1px solid #333; border-radius: 4px;")
+            control_layout = QHBoxLayout(control_frame)
+            
+            control_label = QLabel("Live Attack Injection (25000 Events):")
             control_label.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
-            
-            self._attack_selector = QComboBox()
-            self._attack_selector.setFont(QFont("Consolas", 11))
-            self._attack_selector.addItems([
-                "Safe Transmission (None)", 
-                "Time-Shift Attack", 
-                "Blinding Attack", 
-                "Zero-Day Anomaly"
-            ])
-            self._attack_selector.currentIndexChanged.connect(self._on_attack_changed)
-            
-            self._clear_btn = QPushButton("Clear Telemetry Logs")
-            self._clear_btn.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
-            self._clear_btn.setStyleSheet("background-color: #3a0d0d; color: #ef5350; border: 1px solid #ef5350; padding: 6px; border-radius: 4px;")
-            self._clear_btn.clicked.connect(self._clear_logs)
-            
+            control_label.setStyleSheet("border: none; padding-right: 15px;")
             control_layout.addWidget(control_label)
-            control_layout.addWidget(self._attack_selector)
-            control_layout.addWidget(self._clear_btn)
+            
+            self._btn_timeshift = self._create_injection_button("Inject Time-Shift", "timeshift")
+            self._btn_blinding = self._create_injection_button("Inject Blinding", "blinding")
+            self._btn_zeroday = self._create_injection_button("Inject Zero-Day", "zeroday")
+            
+            control_layout.addWidget(self._btn_timeshift)
+            control_layout.addWidget(self._btn_blinding)
+            control_layout.addWidget(self._btn_zeroday)
             control_layout.addStretch()
-            root_layout.addLayout(control_layout)
+            
+            root_layout.addWidget(control_frame)
 
             mid_splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -157,22 +159,12 @@ if _GUI_AVAILABLE:
 
             self._tabs.addTab(telemetry_tab, "Live Telemetry")
 
-            xai_tab = QWidget()
-            xai_layout = QVBoxLayout(xai_tab)
-            self._xai_image_label = QLabel("Awaiting anomaly detection to populate visual evidence...")
-            self._xai_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._xai_image_label.setFont(QFont("Consolas", 12))
-            xai_layout.addWidget(self._xai_image_label)
-            self._tabs.addTab(xai_tab, "Visual Forensics (XAI)")
-
             self.setStyleSheet("""
                 QMainWindow { background-color: #121212; }
                 QWidget { background-color: #121212; color: #e0e0e0; }
                 QLabel { color: #e0e0e0; }
-                QComboBox { background-color: #1e1e1e; color: #e0e0e0; border: 1px solid #333; padding: 4px; }
-                QComboBox QAbstractItemView { background-color: #1e1e1e; color: #e0e0e0; selection-background-color: #29b6f6; }
-                QPushButton { background-color: #1e1e1e; color: #e0e0e0; border: 1px solid #333; padding: 4px; border-radius: 4px; }
-                QPushButton:hover { background-color: #333; }
+                QPushButton { background-color: #263238; color: #e0e0e0; border: 1px solid #455a64; padding: 8px 16px; border-radius: 4px; font-weight: bold; }
+                QPushButton:hover { background-color: #37474f; }
                 QTextEdit { background-color: #1e1e1e; color: #b0bec5; border: 1px solid #333; }
                 QFrame { border: 1px solid #333; border-radius: 4px; }
                 QProgressBar { border: 1px solid #333; border-radius: 3px; }
@@ -182,11 +174,16 @@ if _GUI_AVAILABLE:
                 QTabBar::tab:selected { background: #29b6f6; color: #000000; font-weight: bold; }
             """)
 
+        def _create_injection_button(self, text: str, attack_mode: str) -> QPushButton:
+            btn = QPushButton(text)
+            btn.clicked.connect(lambda: self._trigger_injection(attack_mode, btn))
+            return btn
+
         @staticmethod
         def _make_vital_label(text: str) -> QLabel:
             lbl = QLabel(text)
             lbl.setFont(QFont("Consolas", 11))
-            lbl.setStyleSheet("padding: 4px;")
+            lbl.setStyleSheet("border: none; padding: 4px;")
             return lbl
 
         def _set_status_style(self, level: str) -> None:
@@ -195,52 +192,20 @@ if _GUI_AVAILABLE:
                 f"background-color: {bg}; color: {fg}; border-radius: 4px; padding: 6px;"
             )
 
-        def _set_initial_dropdown(self, attack_mode: str) -> None:
-            mode_map = {"none": 0, "timeshift": 1, "blinding": 2, "zeroday": 3}
-            if attack_mode in mode_map:
-                self._attack_selector.setCurrentIndex(mode_map[attack_mode])
+        def _trigger_injection(self, attack_mode: str, button: QPushButton) -> None:
+            # Inject 25,000 photons (lasts about 3-4 seconds of real-time)
+            self._worker.inject_attack(attack_mode, 25000)
+            button.setStyleSheet("background-color: #ef5350; color: #000000; font-weight: bold;")
+            self._injection_timer.start(4000) # Reset button visual after 4 seconds
 
-        def _on_attack_changed(self, index: int) -> None:
-            mode_map = {0: "none", 1: "timeshift", 2: "blinding", 3: "zeroday"}
-            selected_mode = mode_map.get(index, "none")
-            
-            self._worker.stop()
-            self._worker.wait()
-            
-            self._status_label.setText("⬤  SWITCHING MODES...")
-            self._set_status_style("warning")
-            self._qber_history.clear()
-            self._qber_history.extend([0.0] * self._HISTORY_LEN)
-            self._qber_curve.setData(list(self._qber_history))
-            self._report_area.clear()
-            self._xai_image_label.clear()
-            self._xai_image_label.setText("Awaiting anomaly detection to populate visual evidence...")
-            self._fill_bar.setValue(0)
-            
-            self._start_worker(selected_mode)
+        def _reset_button_styles(self) -> None:
+            style = "background-color: #263238; color: #e0e0e0; border: 1px solid #455a64; padding: 8px 16px; border-radius: 4px; font-weight: bold;"
+            self._btn_timeshift.setStyleSheet(style)
+            self._btn_blinding.setStyleSheet(style)
+            self._btn_zeroday.setStyleSheet(style)
 
-        def _clear_logs(self) -> None:
-            log_path = os.path.join(_PROJECT_ROOT, "logs", "threat_telemetry.csv")
-            
-            os.makedirs(os.path.dirname(log_path), exist_ok=True)
-            
-            with open(log_path, mode='w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "Timestamp", "System_Verdict", "Detected_Signature", 
-                    "Confidence", "SVM_Triggered", "Voltage", "Jitter", "QBER"
-                ])
-                
-            QMessageBox.information(
-                self, 
-                "Logs Cleared", 
-                "The threat telemetry log has been successfully wiped and reset."
-            )
-
-        def _start_worker(self, attack_mode: str) -> None:
-            intensity = "blinding" if attack_mode == "blinding" else "single_photon"
-            
-            self._worker = IDSWorker(attack_mode=attack_mode, intensity_mode=intensity)
+        def _start_worker(self) -> None:
+            self._worker = IDSWorker(attack_mode="none", intensity_mode="single_photon")
             self._worker.result_ready.connect(self._on_result)
             self._worker.start()
 
@@ -258,13 +223,9 @@ if _GUI_AVAILABLE:
             if verdict == "normal":
                 self._status_label.setText("⬤  SYSTEM SECURE")
                 self._set_status_style("normal")
-                self._xai_image_label.clear()
-                self._xai_image_label.setText("System Secure. No active anomalies.")
             elif "ZERO-DAY" in verdict:
                 self._status_label.setText(f"☢  {verdict}")
                 self._set_status_style("critical")
-                self._xai_image_label.clear()
-                self._xai_image_label.setText("Zero-Day Anomaly Detected.\nNo pre-computed SHAP evidence available for unclassified threats.")
             else:
                 self._status_label.setText(f"⚠  ATTACK DETECTED - {rf_pred.upper()}")
                 self._set_status_style("critical")
@@ -285,17 +246,6 @@ if _GUI_AVAILABLE:
 
             self._report_area.setPlainText(report)
 
-            if rf_pred == "attack_blinding" and flagged:
-                img_path = os.path.join(_PROJECT_ROOT, "Results", "Forensic_Evidence", "Evidence_Blinding_Attack_Summary.png")
-                if os.path.exists(img_path):
-                    pixmap = QPixmap(img_path)
-                    self._xai_image_label.setPixmap(pixmap.scaled(1000, 600, Qt.AspectRatioMode.KeepAspectRatio))
-            elif rf_pred == "attack_timeshift" and flagged:
-                img_path = os.path.join(_PROJECT_ROOT, "Results", "Forensic_Evidence", "Evidence_TimeShift_Attack_Summary.png")
-                if os.path.exists(img_path):
-                    pixmap = QPixmap(img_path)
-                    self._xai_image_label.setPixmap(pixmap.scaled(1000, 600, Qt.AspectRatioMode.KeepAspectRatio))
-
         def closeEvent(self, event) -> None:
             self._worker.stop()
             self._worker.wait(3000)   
@@ -303,17 +253,9 @@ if _GUI_AVAILABLE:
 
 
     def main() -> None:
-        parser = argparse.ArgumentParser(description="QKD Real-Time IDS Dashboard")
-        parser.add_argument(
-            "--attack",
-            choices=["none", "timeshift", "blinding", "zeroday"],
-            default="none",
-        )
-        args = parser.parse_args()
-
         app = QApplication(sys.argv)
-        app.setApplicationName("QKD IDS Dashboard")
-        window = IDSDashboard(attack_mode=args.attack)
+        app.setApplicationName("QKD Live-Fire Sandbox")
+        window = SandboxDashboard()
         window.show()
         sys.exit(app.exec())
 

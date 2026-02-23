@@ -1,12 +1,3 @@
-"""
-streams/quantum_producer.py
-Async generator that emits a continuous stream of raw QKD event dicts
-directly from the physics engine, without touching the filesystem.
-
-Usage:
-    async for event in quantum_event_stream(attack_mode="none"):
-        buffer.push(event)
-"""
 __author__ = "Rahul Rajesh 2360445"
 
 import asyncio
@@ -14,55 +5,34 @@ import sys
 import os
 import numpy as np
 
-# Ensure project root is on sys.path regardless of launch location
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-# Allow imports from the Simulation package
 _SIM_PATH = os.path.join(_PROJECT_ROOT, 'Simulation')
 if _SIM_PATH not in sys.path:
     sys.path.insert(0, _SIM_PATH)
 
-import components as hardware   # type: ignore[import]
-import core_real as phys        # type: ignore[import]
+import components as hardware
+import core_real as phys
 
 from config.logging_config import get_logger
 
 log = get_logger("qkd.simulation")
 
-
 async def quantum_event_stream(
-    attack_mode:    str   = "none",
-    intensity_mode: str   = "single_photon",
-    noise_p:        float = 0.04,
+    attack_mode: str = "none",
+    intensity_mode: str = "single_photon",
+    noise_p: float = 0.04,
+    state_controller: dict = None,
 ) -> "asyncio.AsyncGenerator[dict, None]":
-    """
-    Infinite async generator that emits one raw event dict per simulated photon pulse.
-
-    Yields a dict with the following keys:
-        alice_bit         (int)   — Alice's random bit
-        alice_basis       (int)   — Alice's basis (0=rectilinear, 1=diagonal)
-        bob_basis         (int)   — Bob's randomly chosen measurement basis
-        bob_bit           (int)   — Bob's measurement outcome (0 or 1)
-        detector_voltage  (float) — Current APD bias voltage (V)
-        timing_jitter     (float) — Current APD timing jitter (ns)
-
-    The generator runs indefinitely. Cancel the enclosing task to stop it.
-
-    Args:
-        attack_mode:    'none', 'timeshift'. Blinding is triggered via intensity.
-        intensity_mode: 'single_photon' or 'blinding'.
-        noise_p:        Depolarizing noise probability on the channel (default 4%).
-    """
-    laser    = hardware.LaserSource()
+    
+    laser = hardware.LaserSource()
     detector = hardware.APD_Detector()
     detector.set_attack_mode(attack_mode)
 
-    # Alice and Bob bases are chosen independently per pulse
-    alice_basis_choices = [0, 1]   # 0 = rectilinear, 1 = diagonal
-
-    t: float = 0.0  # simulation time in seconds
+    alice_basis_choices = [0, 1]
+    t: float = 0.0
 
     log.info(
         f"Quantum event stream started | attack={attack_mode} | "
@@ -70,36 +40,43 @@ async def quantum_event_stream(
     )
 
     while True:
-        # ---- Alice's side ------------------------------------------------
-        alice_bit:   int = int(np.random.randint(0, 2))
+        current_attack = attack_mode
+        current_intensity = intensity_mode
+        
+        if state_controller and state_controller.get("active", False):
+            current_attack = state_controller["attack_mode"]
+            current_intensity = state_controller["intensity_mode"]
+            state_controller["remaining"] -= 1
+            if state_controller["remaining"] <= 0:
+                state_controller["active"] = False
+
+        detector.set_attack_mode(current_attack)
+
+        alice_bit: int = int(np.random.randint(0, 2))
         alice_basis: int = int(np.random.choice(alice_basis_choices))
 
-        # Map bit + basis to a polarisation label
         label_map: dict[tuple[int, int], str] = {
-            (0, 0): 'H',  # bit=0, rectilinear
-            (1, 0): 'V',  # bit=1, rectilinear
-            (0, 1): 'D',  # bit=0, diagonal
-            (1, 1): 'A',  # bit=1, diagonal
+            (0, 0): 'H',
+            (1, 0): 'V',
+            (0, 1): 'D',
+            (1, 1): 'A',
         }
-        q_state, flux = laser.emit(label_map[(alice_bit, alice_basis)], intensity_mode)
+        
+        q_state, flux = laser.emit(label_map[(alice_bit, alice_basis)], current_intensity)
 
-        # Apply channel noise only if it's a true quantum single-photon.
-        # Eve's blinding laser is classical and overpowers fiber decoherence.
-        if intensity_mode != "blinding":
+        if current_intensity != "blinding":
             q_state.apply_depolarizing_noise(noise_p)
 
-        # ---- Bob's side --------------------------------------------------
         bob_basis: int = int(np.random.choice(alice_basis_choices))
         basis_str: str = 'rectilinear' if bob_basis == 0 else 'diagonal'
 
         result: int | None = detector.detect(q_state, flux, basis_str, t)
 
-        t += 1e-6  # advance simulation clock
+        t += 1e-6
 
-        # Calculate the true physical count rate based on the current attack state
-        if attack_mode == "timeshift":
+        if current_attack == "timeshift":
             c_rate = float(np.random.normal(0.15, 0.02))
-        elif intensity_mode == "blinding":
+        elif current_intensity == "blinding":
             c_rate = float(np.random.normal(0.99, 0.005))
         else:
             c_rate = float(np.random.normal(0.25, 0.02))
@@ -112,8 +89,7 @@ async def quantum_event_stream(
                 "bob_bit":          result,
                 "detector_voltage": detector.current_voltage,
                 "timing_jitter":    detector.current_jitter,
-                "photon_count_rate": c_rate, # <-- NEW FIELD
+                "photon_count_rate": c_rate,
             }
 
-        # Yield control to the event loop so GUI / inference tasks can run
         await asyncio.sleep(0)
