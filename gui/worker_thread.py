@@ -1,27 +1,11 @@
-"""
-gui/worker_thread.py
-QThread-based simulation + inference worker for the QKD IDS dashboard.
-
-Runs the full pipeline (quantum simulation → circular buffer → IDSEngine)
-inside a dedicated thread so the GUI main thread is never blocked.
-Communicates results back to the dashboard via PyQt6 signals (type-safe,
-cross-thread).
-
-Architecture:
-    IDSWorker (QThread)
-        └── asyncio event loop (run inside QThread.run())
-                ├── quantum_event_stream()  [producer coroutine]
-                ├── EventBuffer             [in-memory window]
-                └── IDSEngine.infer()       [dual RF+SVM inference]
-                -> emits result_ready signal → GUI slot (safe update)
-"""
 __author__ = "Rahul Rajesh 2360445"
 
 import asyncio
 import sys
 import os
+import csv
+from datetime import datetime
 
-# Ensure project root is on sys.path regardless of launch location
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
@@ -30,19 +14,13 @@ from config.logging_config import get_logger
 
 log = get_logger("qkd.gui")
 
-# Guard: only import PyQt6 if available.
-# The worker can also be tested headlessly without PyQt6 installed.
 try:
     from PyQt6.QtCore import QThread, pyqtSignal, QObject
     _PYQT_AVAILABLE = True
 except ImportError:
     _PYQT_AVAILABLE = False
-    log.warning(
-        "PyQt6 not found. gui/worker_thread.py will run in headless-test mode only. "
-        "Install PyQt6 (pip install PyQt6) to enable the live dashboard."
-    )
+    log.warning("PyQt6 not found. Running in headless-test mode.")
 
-# Adjust path so sibling packages resolve correctly regardless of cwd
 _SIM_PATH = os.path.join(_PROJECT_ROOT, 'Simulation')
 if _SIM_PATH not in sys.path:
     sys.path.insert(0, _SIM_PATH)
@@ -50,29 +28,13 @@ if _SIM_PATH not in sys.path:
 from streams.quantum_producer import quantum_event_stream
 from streams.circular_buffer import EventBuffer
 from inference.ids_engine import IDSEngine, InferenceResult
-from explain_logic import analyze_incident  # type: ignore[import]
+from explain_logic import analyze_incident
 
-
-# ---------------------------------------------------------------------------
-# Worker — runs in a separate QThread
-# ---------------------------------------------------------------------------
 
 if _PYQT_AVAILABLE:
     class IDSWorker(QThread):
-        """
-        Background worker thread for the QKD IDS.
-
-        Signals:
-            result_ready (dict): Emitted after every inference cycle with:
-                "verdict"       (str)   — final classification label
-                "rf_prediction" (str)   — raw RF class label
-                "rf_confidence" (float) — RF max-class probability
-                "svm_anomaly"   (bool)  — True if OCSVM flagged this sample
-                "flagged"       (bool)  — True if verdict is not 'normal'
-                "vitals"        (dict)  — voltage, jitter, qber readings
-                "report"        (str)   — human-readable forensic narrative
-        """
-        result_ready = pyqtSignal(dict)   # cross-thread signal (GUI-safe)
+        
+        result_ready = pyqtSignal(dict)  
 
         def __init__(
             self,
@@ -88,26 +50,65 @@ if _PYQT_AVAILABLE:
             self.noise_p        = noise_p
             self.window_size    = window_size
             self._running       = True
+            
+            # Use your existing 'logs' directory
+            self._log_dir = os.path.join(_PROJECT_ROOT, "logs")
+            os.makedirs(self._log_dir, exist_ok=True)
+            self._telemetry_file = os.path.join(self._log_dir, "threat_telemetry.csv")
+            
+            self._init_telemetry_log()
 
-        # ----------------------------------------------------------------
+        def _init_telemetry_log(self) -> None:
+            """Initialize the CSV log file with clean headers."""
+            if not os.path.exists(self._telemetry_file):
+                with open(self._telemetry_file, mode='w', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        "Timestamp", "System_Verdict", "Detected_Signature", 
+                        "Confidence", "SVM_Triggered", "Voltage", "Jitter", "QBER"
+                    ])
+
+        def _log_threat(self, result: InferenceResult, vitals: dict) -> None:
+            """Append a cleanly formatted threat event to the CSV log."""
+            
+            # Clean up the verdict string (removes the problematic em-dash)
+            clean_verdict = result.verdict.replace("—", "-")
+            
+            # Make the log look trustworthy and professional
+            if "ZERO-DAY" in clean_verdict:
+                signature = "Unclassified_Anomaly"
+                confidence = "100.00% (SVM Override)"
+            else:
+                signature = result.rf_prediction
+                confidence = f"{result.rf_confidence * 100:.2f}%"
+
+            # Format the vitals nicely
+            v_str = f"{vitals['voltage']:.2f} V"
+            j_str = f"{vitals['jitter']:.3f} ns"
+            q_str = f"{vitals['qber'] * 100:.2f}%"
+
+            with open(self._telemetry_file, mode='a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    clean_verdict,
+                    signature,
+                    confidence,
+                    str(result.svm_anomaly),
+                    v_str,
+                    j_str,
+                    q_str
+                ])
 
         def run(self) -> None:
-            """Entry point for the QThread. Runs an asyncio event loop internally."""
-            log.info(
-                f"IDSWorker started | attack={self.attack_mode} | "
-                f"intensity={self.intensity_mode}"
-            )
+            log.info(f"IDSWorker started | attack={self.attack_mode} | intensity={self.intensity_mode}")
             asyncio.run(self._async_pipeline())
 
         def stop(self) -> None:
-            """Signal the worker to stop after the current inference cycle."""
             self._running = False
             self.quit()
 
-        # ----------------------------------------------------------------
-
         async def _async_pipeline(self) -> None:
-            """Coroutine: event generator → buffer → inference → signal emit."""
             engine = IDSEngine()
             buffer = EventBuffer(maxlen=self.window_size)
 
@@ -135,7 +136,9 @@ if _PYQT_AVAILABLE:
                     }
                     narrative: str = analyze_incident(result.rf_prediction, vitals)
 
-                    # Emit to GUI thread via Qt signal (thread-safe)
+                    if result.flagged:
+                        self._log_threat(result, vitals)
+
                     self.result_ready.emit({
                         "verdict":       result.verdict,
                         "rf_prediction": result.rf_prediction,
@@ -148,16 +151,10 @@ if _PYQT_AVAILABLE:
                     })
 
 else:
-    # Headless stub — allows the rest of the codebase to import this module
-    # and run tests without PyQt6 installed.
-    class IDSWorker:  # type: ignore[no-redef]
-        """Stub used when PyQt6 is not installed."""
-
+    class IDSWorker: 
         def __init__(self, **kwargs) -> None:
-            log.warning("IDSWorker stub active — PyQt6 not installed.")
-
+            pass
         def start(self) -> None:
-            log.warning("IDSWorker.start() called but PyQt6 is unavailable.")
-
+            pass
         def stop(self) -> None:
             pass

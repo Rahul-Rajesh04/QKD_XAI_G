@@ -4,6 +4,7 @@ import sys
 import os
 import argparse
 import collections
+import csv
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
@@ -19,7 +20,7 @@ try:
         QApplication, QMainWindow, QWidget,
         QVBoxLayout, QHBoxLayout, QLabel,
         QTextEdit, QProgressBar, QSplitter,
-        QFrame, QComboBox, QTabWidget
+        QFrame, QComboBox, QTabWidget, QPushButton
     )
     from PyQt6.QtCore import Qt
     from PyQt6.QtGui import QFont, QPixmap
@@ -44,7 +45,7 @@ if _GUI_AVAILABLE:
 
         def __init__(self, attack_mode: str = "none") -> None:
             super().__init__()
-            self.setWindowTitle("QKD Real-Time IDS — Rahul Rajesh 2360445")
+            self.setWindowTitle("QKD Real-Time IDS - Rahul Rajesh 2360445")
             self.resize(1150, 750)
 
             self._qber_history: collections.deque[float] = collections.deque(
@@ -84,8 +85,14 @@ if _GUI_AVAILABLE:
             ])
             self._attack_selector.currentIndexChanged.connect(self._on_attack_changed)
             
+            self._clear_btn = QPushButton("Clear Telemetry Logs")
+            self._clear_btn.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+            self._clear_btn.setStyleSheet("background-color: #3a0d0d; color: #ef5350; border: 1px solid #ef5350; padding: 6px; border-radius: 4px;")
+            self._clear_btn.clicked.connect(self._clear_logs)
+            
             control_layout.addWidget(control_label)
             control_layout.addWidget(self._attack_selector)
+            control_layout.addWidget(self._clear_btn)
             control_layout.addStretch()
             root_layout.addLayout(control_layout)
 
@@ -120,9 +127,9 @@ if _GUI_AVAILABLE:
             self._plot_widget.getAxis("left").enableAutoSIPrefix(False)
             self._plot_widget.setLabel("left",   "QBER")
             self._plot_widget.setLabel("bottom", "Window index")
-            self._plot_widget.setMouseEnabled(x=False, y=False) # Disables dragging and zooming
-            self._plot_widget.hideButtons()                     # Hides the tiny "A" auto-scale button in the corner
-            self._plot_widget.setLimits(yMin=0.0, yMax=1.0)     # Physics constraint: QBER is strictly between 0 and 100%
+            self._plot_widget.setMouseEnabled(x=False, y=False)
+            self._plot_widget.hideButtons()
+            self._plot_widget.setLimits(yMin=0.0, yMax=1.0)
             self._plot_widget.addLine(y=0.04,  pen=pg.mkPen("#4caf50", style=Qt.PenStyle.DashLine))
             self._plot_widget.addLine(y=0.11,  pen=pg.mkPen("#ffca28", style=Qt.PenStyle.DashLine))
             self._qber_curve = self._plot_widget.plot(
@@ -164,6 +171,8 @@ if _GUI_AVAILABLE:
                 QLabel { color: #e0e0e0; }
                 QComboBox { background-color: #1e1e1e; color: #e0e0e0; border: 1px solid #333; padding: 4px; }
                 QComboBox QAbstractItemView { background-color: #1e1e1e; color: #e0e0e0; selection-background-color: #29b6f6; }
+                QPushButton { background-color: #1e1e1e; color: #e0e0e0; border: 1px solid #333; padding: 4px; border-radius: 4px; }
+                QPushButton:hover { background-color: #333; }
                 QTextEdit { background-color: #1e1e1e; color: #b0bec5; border: 1px solid #333; }
                 QFrame { border: 1px solid #333; border-radius: 4px; }
                 QProgressBar { border: 1px solid #333; border-radius: 3px; }
@@ -210,6 +219,21 @@ if _GUI_AVAILABLE:
             
             self._start_worker(selected_mode)
 
+        def _clear_logs(self) -> None:
+            log_path = os.path.join(_PROJECT_ROOT, "logs", "threat_telemetry.csv")
+            
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            
+            with open(log_path, mode='w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "Timestamp", "System_Verdict", "Detected_Signature", 
+                    "Confidence", "SVM_Triggered", "Voltage", "Jitter", "QBER"
+                ])
+                
+            self._status_label.setText("⬤  LOGS CLEARED")
+            self._set_status_style("warning")
+
         def _start_worker(self, attack_mode: str) -> None:
             intensity = "blinding" if attack_mode == "blinding" else "single_photon"
             
@@ -239,7 +263,7 @@ if _GUI_AVAILABLE:
                 self._xai_image_label.clear()
                 self._xai_image_label.setText("Zero-Day Anomaly Detected.\nNo pre-computed SHAP evidence available for unclassified threats.")
             else:
-                self._status_label.setText(f"⚠  ATTACK DETECTED — {rf_pred.upper()}")
+                self._status_label.setText(f"⚠  ATTACK DETECTED - {rf_pred.upper()}")
                 self._set_status_style("critical")
 
             self._voltage_lbl.setText(f"Voltage:  {vitals['voltage']:.2f} V")
@@ -295,4 +319,4 @@ if _GUI_AVAILABLE:
         main()
 
 else:
-    log.error("Cannot launch GUI — PyQt6 and/or pyqtgraph not installed.")
+    log.error("Cannot launch GUI - PyQt6 and/or pyqtgraph not installed.")
