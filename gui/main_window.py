@@ -5,6 +5,8 @@ import os
 import argparse
 import collections
 import csv
+import time
+from datetime import datetime
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
@@ -20,7 +22,7 @@ try:
         QApplication, QMainWindow, QWidget,
         QVBoxLayout, QHBoxLayout, QLabel,
         QTextEdit, QProgressBar, QSplitter,
-        QFrame, QComboBox, QTabWidget, QPushButton, QMessageBox
+        QFrame, QComboBox, QTabWidget, QPushButton, QMessageBox, QSlider
     )
     from PyQt6.QtCore import Qt
     from PyQt6.QtGui import QFont, QPixmap
@@ -51,10 +53,29 @@ if _GUI_AVAILABLE:
             self._qber_history: collections.deque[float] = collections.deque(
                 [0.0] * self._HISTORY_LEN, maxlen=self._HISTORY_LEN
             )
+            
+            # Throttling timers for operational logging
+            self._last_abort_log_time = 0.0
+            self._last_warn_log_time = 0.0
 
+            self._init_environmental_logs()
             self._build_ui()
             self._set_initial_dropdown(attack_mode)
             self._start_worker(attack_mode)
+
+        def _init_environmental_logs(self) -> None:
+            self._degradation_log = os.path.join(_PROJECT_ROOT, "logs", "channel_degradation.csv")
+            self._abort_log = os.path.join(_PROJECT_ROOT, "logs", "critical_aborts.csv")
+            
+            os.makedirs(os.path.dirname(self._degradation_log), exist_ok=True)
+            
+            if not os.path.exists(self._degradation_log):
+                with open(self._degradation_log, 'w', newline='', encoding='utf-8') as f:
+                    csv.writer(f).writerow(["Timestamp", "Warning_Type", "Live_QBER", "Noise_Threshold", "Voltage", "Jitter"])
+                    
+            if not os.path.exists(self._abort_log):
+                with open(self._abort_log, 'w', newline='', encoding='utf-8') as f:
+                    csv.writer(f).writerow(["Timestamp", "Event_Type", "Live_QBER", "Abort_Threshold", "Voltage", "Jitter"])
 
         def _build_ui(self) -> None:
             self._tabs = QTabWidget()
@@ -85,7 +106,7 @@ if _GUI_AVAILABLE:
             ])
             self._attack_selector.currentIndexChanged.connect(self._on_attack_changed)
             
-            self._clear_btn = QPushButton("Clear Telemetry Logs")
+            self._clear_btn = QPushButton("Clear All Logs")
             self._clear_btn.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
             self._clear_btn.setStyleSheet("background-color: #3a0d0d; color: #ef5350; border: 1px solid #ef5350; padding: 6px; border-radius: 4px;")
             self._clear_btn.clicked.connect(self._clear_logs)
@@ -95,6 +116,30 @@ if _GUI_AVAILABLE:
             control_layout.addWidget(self._clear_btn)
             control_layout.addStretch()
             root_layout.addLayout(control_layout)
+
+            slider_layout = QHBoxLayout()
+            
+            self._noise_lbl = QLabel("Noise Floor: 4.0%")
+            self._noise_lbl.setFont(QFont("Consolas", 10))
+            self._noise_slider = QSlider(Qt.Orientation.Horizontal)
+            self._noise_slider.setRange(0, 300)
+            self._noise_slider.setValue(40)
+            self._noise_slider.valueChanged.connect(self._update_thresholds)
+            
+            self._abort_lbl = QLabel("Abort Threshold: 11.0%")
+            self._abort_lbl.setFont(QFont("Consolas", 10))
+            self._abort_slider = QSlider(Qt.Orientation.Horizontal)
+            self._abort_slider.setRange(0, 300)
+            self._abort_slider.setValue(110)
+            self._abort_slider.valueChanged.connect(self._update_thresholds)
+            
+            slider_layout.addWidget(self._noise_lbl)
+            slider_layout.addWidget(self._noise_slider)
+            slider_layout.addSpacing(40)
+            slider_layout.addWidget(self._abort_lbl)
+            slider_layout.addWidget(self._abort_slider)
+            
+            root_layout.addLayout(slider_layout)
 
             mid_splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -130,8 +175,15 @@ if _GUI_AVAILABLE:
             self._plot_widget.setMouseEnabled(x=False, y=False)
             self._plot_widget.hideButtons()
             self._plot_widget.setLimits(yMin=0.0, yMax=1.0)
-            self._plot_widget.addLine(y=0.04,  pen=pg.mkPen("#4caf50", style=Qt.PenStyle.DashLine))
-            self._plot_widget.addLine(y=0.11,  pen=pg.mkPen("#ffca28", style=Qt.PenStyle.DashLine))
+            
+            self._noise_line = pg.InfiniteLine(angle=0, pen=pg.mkPen("#4caf50", style=Qt.PenStyle.DashLine))
+            self._noise_line.setValue(0.04)
+            self._plot_widget.addItem(self._noise_line)
+            
+            self._abort_line = pg.InfiniteLine(angle=0, pen=pg.mkPen("#ffca28", style=Qt.PenStyle.DashLine))
+            self._abort_line.setValue(0.11)
+            self._plot_widget.addItem(self._abort_line)
+            
             self._qber_curve = self._plot_widget.plot(
                 list(self._qber_history),
                 pen=pg.mkPen("#29b6f6", width=2),
@@ -180,7 +232,19 @@ if _GUI_AVAILABLE:
                 QTabWidget::pane { border: 1px solid #333; }
                 QTabBar::tab { background: #1e1e1e; color: #e0e0e0; padding: 8px 16px; border: 1px solid #333; }
                 QTabBar::tab:selected { background: #29b6f6; color: #000000; font-weight: bold; }
+                QSlider::groove:horizontal { border: 1px solid #333; height: 8px; background: #1e1e1e; margin: 2px 0; border-radius: 4px; }
+                QSlider::handle:horizontal { background: #29b6f6; border: 1px solid #29b6f6; width: 14px; margin: -4px 0; border-radius: 7px; }
             """)
+
+        def _update_thresholds(self) -> None:
+            noise_val = self._noise_slider.value() / 1000.0
+            abort_val = self._abort_slider.value() / 1000.0
+            
+            self._noise_lbl.setText(f"Noise Floor: {noise_val*100:.1f}%")
+            self._abort_lbl.setText(f"Abort Threshold: {abort_val*100:.1f}%")
+            
+            self._noise_line.setValue(noise_val)
+            self._abort_line.setValue(abort_val)
 
         @staticmethod
         def _make_vital_label(text: str) -> QLabel:
@@ -220,22 +284,22 @@ if _GUI_AVAILABLE:
             self._start_worker(selected_mode)
 
         def _clear_logs(self) -> None:
-            log_path = os.path.join(_PROJECT_ROOT, "logs", "threat_telemetry.csv")
+            log_dir = os.path.join(_PROJECT_ROOT, "logs")
+            os.makedirs(log_dir, exist_ok=True)
             
-            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            # Wipe threat telemetry
+            with open(os.path.join(log_dir, "threat_telemetry.csv"), 'w', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerow(["Timestamp", "System_Verdict", "Detected_Signature", "Confidence", "SVM_Triggered", "Voltage", "Jitter", "QBER"])
             
-            with open(log_path, mode='w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "Timestamp", "System_Verdict", "Detected_Signature", 
-                    "Confidence", "SVM_Triggered", "Voltage", "Jitter", "QBER"
-                ])
+            # Wipe degradation log
+            with open(self._degradation_log, 'w', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerow(["Timestamp", "Warning_Type", "Live_QBER", "Noise_Threshold", "Voltage", "Jitter"])
                 
-            QMessageBox.information(
-                self, 
-                "Logs Cleared", 
-                "The threat telemetry log has been successfully wiped and reset."
-            )
+            # Wipe aborts log
+            with open(self._abort_log, 'w', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerow(["Timestamp", "Event_Type", "Live_QBER", "Abort_Threshold", "Voltage", "Jitter"])
+                
+            QMessageBox.information(self, "Logs Cleared", "All telemetry, degradation, and abort logs have been successfully wiped and reset.")
 
         def _start_worker(self, attack_mode: str) -> None:
             intensity = "blinding" if attack_mode == "blinding" else "single_photon"
@@ -255,19 +319,71 @@ if _GUI_AVAILABLE:
 
             self._fill_bar.setValue(500)
 
-            if verdict == "normal":
-                self._status_label.setText("⬤  SYSTEM SECURE")
-                self._set_status_style("normal")
+            noise_threshold = self._noise_slider.value() / 1000.0
+            abort_threshold = self._abort_slider.value() / 1000.0
+            current_qber = vitals["qber"]
+            
+            is_qber_abort = current_qber >= abort_threshold
+            is_noise_warning = current_qber > noise_threshold and not is_qber_abort
+
+            # 1. Handle UI and Logging for Critical Aborts
+            if is_qber_abort:
+                self._status_label.setText(f"⛔  ABORT: QBER EXCEEDS {abort_threshold:.1%}")
+                self._set_status_style("critical")
                 self._xai_image_label.clear()
-                self._xai_image_label.setText("System Secure. No active anomalies.")
+                self._xai_image_label.setText("Connection Aborted: High QBER threshold breached.")
+                report = f"CRITICAL SYSTEM ABORT\nLive QBER ({current_qber:.2%}) exceeds the dynamic abort threshold ({abort_threshold:.1%}).\nKey generation suspended to prevent eavesdropping."
+                
+                # Log to the aborts file with a 5-second throttle
+                if time.time() - self._last_abort_log_time > 5.0:
+                    with open(self._abort_log, 'a', newline='', encoding='utf-8') as f:
+                        csv.writer(f).writerow([
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "THRESHOLD_BREACH_ABORT",
+                            f"{current_qber*100:.2f}%",
+                            f"{abort_threshold*100:.1f}%",
+                            f"{vitals['voltage']:.2f} V",
+                            f"{vitals['jitter']:.3f} ns"
+                        ])
+                    self._last_abort_log_time = time.time()
+
+            # 2. Handle ML Cyber Attack Overrides
             elif "ZERO-DAY" in verdict:
                 self._status_label.setText(f"☢  {verdict}")
                 self._set_status_style("critical")
                 self._xai_image_label.clear()
                 self._xai_image_label.setText("Zero-Day Anomaly Detected.\nNo pre-computed SHAP evidence available for unclassified threats.")
-            else:
+            elif verdict != "normal":
                 self._status_label.setText(f"⚠  ATTACK DETECTED - {rf_pred.upper()}")
                 self._set_status_style("critical")
+
+            # 3. Handle UI and Logging for Environmental Noise
+            elif is_noise_warning:
+                self._status_label.setText(f"⚠  WARNING: ELEVATED CHANNEL NOISE")
+                self._set_status_style("warning")
+                self._xai_image_label.clear()
+                self._xai_image_label.setText(f"No attack detected, but channel noise ({current_qber:.2%}) exceeds baseline ({noise_threshold:.1%}).")
+                report = f"ELEVATED NOISE WARNING\nLive QBER is above the expected baseline.\nThis indicates fiber degradation, temperature fluctuation, or misalignment.\nSecure key rate is degraded."
+                
+                # Log to the degradation file with a 5-second throttle
+                if time.time() - self._last_warn_log_time > 5.0:
+                    with open(self._degradation_log, 'a', newline='', encoding='utf-8') as f:
+                        csv.writer(f).writerow([
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "ELEVATED_NOISE_WARNING",
+                            f"{current_qber*100:.2f}%",
+                            f"{noise_threshold*100:.1f}%",
+                            f"{vitals['voltage']:.2f} V",
+                            f"{vitals['jitter']:.3f} ns"
+                        ])
+                    self._last_warn_log_time = time.time()
+                    
+            # 4. Handle Normal Operation
+            else:
+                self._status_label.setText("⬤  SYSTEM SECURE")
+                self._set_status_style("normal")
+                self._xai_image_label.clear()
+                self._xai_image_label.setText("System Secure. No active anomalies.")
 
             self._voltage_lbl.setText(f"Voltage:  {vitals['voltage']:.2f} V")
             self._jitter_lbl.setText( f"Jitter:   {vitals['jitter']:.2f} ns")
@@ -285,22 +401,22 @@ if _GUI_AVAILABLE:
 
             self._report_area.setPlainText(report)
 
-            if rf_pred == "attack_blinding" and flagged:
-                img_path = os.path.join(_PROJECT_ROOT, "Results", "Forensic_Evidence", "Evidence_Blinding_Attack_Summary.png")
-                if os.path.exists(img_path):
-                    pixmap = QPixmap(img_path)
-                    self._xai_image_label.setPixmap(pixmap.scaled(1000, 600, Qt.AspectRatioMode.KeepAspectRatio))
-            elif rf_pred == "attack_timeshift" and flagged:
-                img_path = os.path.join(_PROJECT_ROOT, "Results", "Forensic_Evidence", "Evidence_TimeShift_Attack_Summary.png")
-                if os.path.exists(img_path):
-                    pixmap = QPixmap(img_path)
-                    self._xai_image_label.setPixmap(pixmap.scaled(1000, 600, Qt.AspectRatioMode.KeepAspectRatio))
+            if not is_qber_abort and not is_noise_warning:
+                if rf_pred == "attack_blinding" and flagged:
+                    img_path = os.path.join(_PROJECT_ROOT, "Results", "Forensic_Evidence", "Evidence_Blinding_Attack_Summary.png")
+                    if os.path.exists(img_path):
+                        pixmap = QPixmap(img_path)
+                        self._xai_image_label.setPixmap(pixmap.scaled(1000, 600, Qt.AspectRatioMode.KeepAspectRatio))
+                elif rf_pred == "attack_timeshift" and flagged:
+                    img_path = os.path.join(_PROJECT_ROOT, "Results", "Forensic_Evidence", "Evidence_TimeShift_Attack_Summary.png")
+                    if os.path.exists(img_path):
+                        pixmap = QPixmap(img_path)
+                        self._xai_image_label.setPixmap(pixmap.scaled(1000, 600, Qt.AspectRatioMode.KeepAspectRatio))
 
         def closeEvent(self, event) -> None:
             self._worker.stop()
             self._worker.wait(3000)   
             super().closeEvent(event)
-
 
     def main() -> None:
         parser = argparse.ArgumentParser(description="QKD Real-Time IDS Dashboard")
@@ -316,7 +432,6 @@ if _GUI_AVAILABLE:
         window = IDSDashboard(attack_mode=args.attack)
         window.show()
         sys.exit(app.exec())
-
 
     if __name__ == "__main__":
         main()

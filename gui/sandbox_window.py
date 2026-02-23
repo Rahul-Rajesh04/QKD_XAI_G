@@ -1,7 +1,3 @@
-"""
-gui/sandbox_window.py
-PyQt6 Live-Fire Sandbox - Real-time transient attack injection.
-"""
 __author__ = "Rahul Rajesh 2360445"
 
 import sys
@@ -23,7 +19,7 @@ try:
         QApplication, QMainWindow, QWidget,
         QVBoxLayout, QHBoxLayout, QLabel,
         QTextEdit, QProgressBar, QSplitter,
-        QFrame, QPushButton, QTabWidget
+        QFrame, QPushButton, QTabWidget, QSlider
     )
     from PyQt6.QtCore import Qt, QTimer
     from PyQt6.QtGui import QFont, QPixmap
@@ -77,7 +73,6 @@ if _GUI_AVAILABLE:
             self._set_status_style("normal")
             root_layout.addWidget(self._status_label)
 
-            # --- LIVE INJECTION CONTROL PANEL ---
             control_frame = QFrame()
             control_frame.setStyleSheet("background-color: #1e1e1e; border: 1px solid #333; border-radius: 4px;")
             control_layout = QHBoxLayout(control_frame)
@@ -97,6 +92,30 @@ if _GUI_AVAILABLE:
             control_layout.addStretch()
             
             root_layout.addWidget(control_frame)
+
+            slider_layout = QHBoxLayout()
+            
+            self._noise_lbl = QLabel("Noise Floor: 4.0%")
+            self._noise_lbl.setFont(QFont("Consolas", 10))
+            self._noise_slider = QSlider(Qt.Orientation.Horizontal)
+            self._noise_slider.setRange(0, 300)
+            self._noise_slider.setValue(40)
+            self._noise_slider.valueChanged.connect(self._update_thresholds)
+            
+            self._abort_lbl = QLabel("Abort Threshold: 11.0%")
+            self._abort_lbl.setFont(QFont("Consolas", 10))
+            self._abort_slider = QSlider(Qt.Orientation.Horizontal)
+            self._abort_slider.setRange(0, 300)
+            self._abort_slider.setValue(110)
+            self._abort_slider.valueChanged.connect(self._update_thresholds)
+            
+            slider_layout.addWidget(self._noise_lbl)
+            slider_layout.addWidget(self._noise_slider)
+            slider_layout.addSpacing(40)
+            slider_layout.addWidget(self._abort_lbl)
+            slider_layout.addWidget(self._abort_slider)
+            
+            root_layout.addLayout(slider_layout)
 
             mid_splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -132,8 +151,15 @@ if _GUI_AVAILABLE:
             self._plot_widget.setMouseEnabled(x=False, y=False)
             self._plot_widget.hideButtons()
             self._plot_widget.setLimits(yMin=0.0, yMax=1.0)
-            self._plot_widget.addLine(y=0.04,  pen=pg.mkPen("#4caf50", style=Qt.PenStyle.DashLine))
-            self._plot_widget.addLine(y=0.11,  pen=pg.mkPen("#ffca28", style=Qt.PenStyle.DashLine))
+            
+            self._noise_line = pg.InfiniteLine(angle=0, pen=pg.mkPen("#4caf50", style=Qt.PenStyle.DashLine))
+            self._noise_line.setValue(0.04)
+            self._plot_widget.addItem(self._noise_line)
+            
+            self._abort_line = pg.InfiniteLine(angle=0, pen=pg.mkPen("#ffca28", style=Qt.PenStyle.DashLine))
+            self._abort_line.setValue(0.11)
+            self._plot_widget.addItem(self._abort_line)
+            
             self._qber_curve = self._plot_widget.plot(
                 list(self._qber_history),
                 pen=pg.mkPen("#29b6f6", width=2),
@@ -172,7 +198,19 @@ if _GUI_AVAILABLE:
                 QTabWidget::pane { border: 1px solid #333; }
                 QTabBar::tab { background: #1e1e1e; color: #e0e0e0; padding: 8px 16px; border: 1px solid #333; }
                 QTabBar::tab:selected { background: #29b6f6; color: #000000; font-weight: bold; }
+                QSlider::groove:horizontal { border: 1px solid #333; height: 8px; background: #1e1e1e; margin: 2px 0; border-radius: 4px; }
+                QSlider::handle:horizontal { background: #29b6f6; border: 1px solid #29b6f6; width: 14px; margin: -4px 0; border-radius: 7px; }
             """)
+
+        def _update_thresholds(self) -> None:
+            noise_val = self._noise_slider.value() / 1000.0
+            abort_val = self._abort_slider.value() / 1000.0
+            
+            self._noise_lbl.setText(f"Noise Floor: {noise_val*100:.1f}%")
+            self._abort_lbl.setText(f"Abort Threshold: {abort_val*100:.1f}%")
+            
+            self._noise_line.setValue(noise_val)
+            self._abort_line.setValue(abort_val)
 
         def _create_injection_button(self, text: str, attack_mode: str) -> QPushButton:
             btn = QPushButton(text)
@@ -193,10 +231,9 @@ if _GUI_AVAILABLE:
             )
 
         def _trigger_injection(self, attack_mode: str, button: QPushButton) -> None:
-            # Inject 25,000 photons (lasts about 3-4 seconds of real-time)
             self._worker.inject_attack(attack_mode, 25000)
             button.setStyleSheet("background-color: #ef5350; color: #000000; font-weight: bold;")
-            self._injection_timer.start(4000) # Reset button visual after 4 seconds
+            self._injection_timer.start(4000) 
 
         def _reset_button_styles(self) -> None:
             style = "background-color: #263238; color: #e0e0e0; border: 1px solid #455a64; padding: 8px 16px; border-radius: 4px; font-weight: bold;"
@@ -215,20 +252,34 @@ if _GUI_AVAILABLE:
             rf_pred     = result["rf_prediction"]
             rf_conf     = result["rf_confidence"]
             svm_anomaly = result["svm_anomaly"]
-            flagged     = result["flagged"]
             report      = result["report"]
 
             self._fill_bar.setValue(500)
 
-            if verdict == "normal":
-                self._status_label.setText("⬤  SYSTEM SECURE")
-                self._set_status_style("normal")
+            noise_threshold = self._noise_slider.value() / 1000.0
+            abort_threshold = self._abort_slider.value() / 1000.0
+            current_qber = vitals["qber"]
+            
+            is_qber_abort = current_qber >= abort_threshold
+            is_noise_warning = current_qber > noise_threshold and not is_qber_abort
+
+            if is_qber_abort:
+                self._status_label.setText(f"⛔  ABORT: QBER EXCEEDS {abort_threshold:.1%}")
+                self._set_status_style("critical")
+                report = f"CRITICAL SYSTEM ABORT\nLive QBER ({current_qber:.2%}) exceeds the dynamic abort threshold ({abort_threshold:.1%}).\nKey generation suspended to prevent eavesdropping."
             elif "ZERO-DAY" in verdict:
                 self._status_label.setText(f"☢  {verdict}")
                 self._set_status_style("critical")
-            else:
+            elif verdict != "normal":
                 self._status_label.setText(f"⚠  ATTACK DETECTED - {rf_pred.upper()}")
                 self._set_status_style("critical")
+            elif is_noise_warning:
+                self._status_label.setText(f"⚠  WARNING: ELEVATED CHANNEL NOISE")
+                self._set_status_style("warning")
+                report = f"ELEVATED NOISE WARNING\nLive QBER is above the expected baseline.\nThis indicates fiber degradation, temperature fluctuation, or misalignment.\nSecure key rate is degraded."
+            else:
+                self._status_label.setText("⬤  SYSTEM SECURE")
+                self._set_status_style("normal")
 
             self._voltage_lbl.setText(f"Voltage:  {vitals['voltage']:.2f} V")
             self._jitter_lbl.setText( f"Jitter:   {vitals['jitter']:.2f} ns")
