@@ -83,8 +83,10 @@ async def quantum_event_stream(
         }
         q_state, flux = laser.emit(label_map[(alice_bit, alice_basis)], intensity_mode)
 
-        # Apply channel noise (depolarizing)
-        q_state.apply_depolarizing_noise(noise_p)
+        # Apply channel noise only if it's a true quantum single-photon.
+        # Eve's blinding laser is classical and overpowers fiber decoherence.
+        if intensity_mode != "blinding":
+            q_state.apply_depolarizing_noise(noise_p)
 
         # ---- Bob's side --------------------------------------------------
         bob_basis: int = int(np.random.choice(alice_basis_choices))
@@ -94,6 +96,14 @@ async def quantum_event_stream(
 
         t += 1e-6  # advance simulation clock
 
+        # Calculate the true physical count rate based on the current attack state
+        if attack_mode == "timeshift":
+            c_rate = float(np.random.normal(0.15, 0.02))
+        elif intensity_mode == "blinding":
+            c_rate = float(np.random.normal(0.99, 0.005))
+        else:
+            c_rate = float(np.random.normal(0.25, 0.02))
+
         if result is not None:
             yield {
                 "alice_bit":        alice_bit,
@@ -102,6 +112,7 @@ async def quantum_event_stream(
                 "bob_bit":          result,
                 "detector_voltage": detector.current_voltage,
                 "timing_jitter":    detector.current_jitter,
+                "photon_count_rate": c_rate, # <-- NEW FIELD
             }
 
         # Yield control to the event loop so GUI / inference tasks can run

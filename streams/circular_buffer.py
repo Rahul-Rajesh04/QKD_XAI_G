@@ -94,10 +94,13 @@ class EventBuffer:
         bob_bit:     np.ndarray = np.array([e["bob_bit"]     for e in events], dtype=np.int_)
         voltages:    np.ndarray = np.array([e["detector_voltage"] for e in events], dtype=np.float64)
         jitters:     np.ndarray = np.array([e["timing_jitter"]    for e in events], dtype=np.float64)
+        
+        # --- NEW LINE: Extract the true count rate ---
+        counts:      np.ndarray = np.array([e.get("photon_count_rate", 0.25) for e in events], dtype=np.float64)
 
         # Sifting
         match:    np.ndarray = alice_basis == bob_basis
-        error:    np.ndarray = (alice_bit  != bob_bit) & match
+        error:    np.ndarray = (alice_bit != bob_bit) & match
         is_rect:  np.ndarray = alice_basis == 0
         is_diag:  np.ndarray = alice_basis == 1
 
@@ -112,7 +115,8 @@ class EventBuffer:
         qber_r: float = n_err_r / n_count_r if n_count_r > 0 else 0.0
         qber_d: float = n_err_d / n_count_d if n_count_d > 0 else 0.0
 
-        count_rate: float = n_sifted / n  # fraction of detected + sifted events
+        # --- UPDATED LINE: Use the mean of the actual physical counts ---
+        count_rate: float = float(counts.mean()) 
 
         return pd.DataFrame([{
             "qber_overall":      qber_o,
