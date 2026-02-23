@@ -1,26 +1,3 @@
-"""
-gui/main_window.py
-PyQt6 IDS Dashboard — main application window.
-
-Layout:
-  ┌──────────────────────────────────────────────────────┐
-  │  QKD Real-Time IDS Dashboard                         │
-  ├──────────────────────────────────────────────────────┤
-  │  [STATUS BANNER]  SYSTEM SECURE / ATTACK DETECTED    │
-  ├────────────────┬─────────────────────────────────────┤
-  │  Live Vitals   │  QBER Timeline (scrolling plot)      │
-  │  Voltage: X.XV │                                      │
-  │  Jitter:  X.Xns│                                      │
-  │  QBER:   X.X%  │                                      │
-  ├────────────────┴─────────────────────────────────────┤
-  │  RF:  attack_blinding (99.8%)   SVM: ANOMALY         │
-  ├──────────────────────────────────────────────────────┤
-  │  Forensic Report text area                           │
-  └──────────────────────────────────────────────────────┘
-
-Usage:
-    python gui/main_window.py [--attack none|timeshift|blinding]
-"""
 __author__ = "Rahul Rajesh 2360445"
 
 import sys
@@ -28,7 +5,6 @@ import os
 import argparse
 import collections
 
-# Ensure project root is on sys.path regardless of launch location
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
@@ -43,53 +19,41 @@ try:
         QApplication, QMainWindow, QWidget,
         QVBoxLayout, QHBoxLayout, QLabel,
         QTextEdit, QProgressBar, QSplitter,
-        QFrame,
+        QFrame, QComboBox
     )
     from PyQt6.QtCore import Qt, QTimer
     from PyQt6.QtGui import QFont, QColor
-    import pyqtgraph as pg         # pip install pyqtgraph
+    import pyqtgraph as pg        
     _GUI_AVAILABLE = True
 except ImportError as exc:
     _GUI_AVAILABLE = False
-    log.error(
-        f"GUI dependencies not available: {exc}. "
-        "Run: pip install PyQt6 pyqtgraph"
-    )
+    log.error(f"GUI dependencies not available: {exc}. Run: pip install PyQt6 pyqtgraph")
 
 if _GUI_AVAILABLE:
     from gui.worker_thread import IDSWorker
 
     class IDSDashboard(QMainWindow):
-        """
-        Real-time IDS dashboard window.
-        All widget updates happen in the main thread via the result_ready signal.
-        """
 
-        _HISTORY_LEN: int = 200   # Number of QBER points shown on the rolling plot
+        _HISTORY_LEN: int = 200   
 
-        # Alert colour palette
         _COLORS = {
-            "normal":   ("#1e3a1e", "#4caf50"),   # dark green bg, bright green text
-            "warning":  ("#3a2e00", "#ffca28"),   # amber
-            "critical": ("#3a0d0d", "#ef5350"),   # red
+            "normal":   ("#1e3a1e", "#4caf50"),   
+            "warning":  ("#3a2e00", "#ffca28"),   
+            "critical": ("#3a0d0d", "#ef5350"),   
         }
 
         def __init__(self, attack_mode: str = "none") -> None:
             super().__init__()
             self.setWindowTitle("QKD Real-Time IDS — Rahul Rajesh 2360445")
-            self.resize(1100, 700)
+            self.resize(1100, 750)
 
-            # Rolling QBER history for the plot
             self._qber_history: collections.deque[float] = collections.deque(
                 [0.0] * self._HISTORY_LEN, maxlen=self._HISTORY_LEN
             )
 
             self._build_ui()
+            self._set_initial_dropdown(attack_mode)
             self._start_worker(attack_mode)
-
-        # ----------------------------------------------------------------
-        # UI Construction
-        # ----------------------------------------------------------------
 
         def _build_ui(self) -> None:
             central = QWidget()
@@ -97,7 +61,6 @@ if _GUI_AVAILABLE:
             root_layout = QVBoxLayout(central)
             root_layout.setSpacing(8)
 
-            # ---- Status banner ------------------------------------------
             self._status_label = QLabel("⬤  INITIALISING…")
             self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._status_label.setFont(QFont("Consolas", 16, QFont.Weight.Bold))
@@ -105,7 +68,25 @@ if _GUI_AVAILABLE:
             self._set_status_style("warning")
             root_layout.addWidget(self._status_label)
 
-            # ---- Middle row: vitals | QBER plot -------------------------
+            control_layout = QHBoxLayout()
+            control_label = QLabel("Active Simulation Mode:")
+            control_label.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
+            
+            self._attack_selector = QComboBox()
+            self._attack_selector.setFont(QFont("Consolas", 11))
+            self._attack_selector.addItems([
+                "Safe Transmission (None)", 
+                "Time-Shift Attack", 
+                "Blinding Attack", 
+                "Zero-Day Anomaly"
+            ])
+            self._attack_selector.currentIndexChanged.connect(self._on_attack_changed)
+            
+            control_layout.addWidget(control_label)
+            control_layout.addWidget(self._attack_selector)
+            control_layout.addStretch()
+            root_layout.addLayout(control_layout)
+
             mid_splitter = QSplitter(Qt.Orientation.Horizontal)
 
             vitals_frame = QFrame()
@@ -122,7 +103,6 @@ if _GUI_AVAILABLE:
 
             vitals_layout.addStretch()
 
-            # Buffer fill progress bar
             fill_label = QLabel("Buffer fill:")
             self._fill_bar = QProgressBar()
             self._fill_bar.setMaximum(500)
@@ -132,13 +112,11 @@ if _GUI_AVAILABLE:
 
             mid_splitter.addWidget(vitals_frame)
 
-            # QBER rolling plot
             self._plot_widget = pg.PlotWidget(title="QBER Timeline")
             self._plot_widget.setBackground("#0d0d0d")
             self._plot_widget.setYRange(0, 0.30, padding=0.05)
             self._plot_widget.setLabel("left",   "QBER")
             self._plot_widget.setLabel("bottom", "Window index")
-            # Noise floor reference line
             self._plot_widget.addLine(y=0.04,  pen=pg.mkPen("#4caf50", style=Qt.PenStyle.DashLine))
             self._plot_widget.addLine(y=0.11,  pen=pg.mkPen("#ffca28", style=Qt.PenStyle.DashLine))
             self._qber_curve = self._plot_widget.plot(
@@ -149,7 +127,6 @@ if _GUI_AVAILABLE:
             mid_splitter.setSizes([200, 900])
             root_layout.addWidget(mid_splitter)
 
-            # ---- Model readout row --------------------------------------
             model_row = QHBoxLayout()
             self._rf_label  = QLabel("RF:  —")
             self._svm_label = QLabel("SVM: —")
@@ -158,7 +135,6 @@ if _GUI_AVAILABLE:
                 model_row.addWidget(lbl)
             root_layout.addLayout(model_row)
 
-            # ---- Forensic report ----------------------------------------
             self._report_area = QTextEdit()
             self._report_area.setReadOnly(True)
             self._report_area.setFont(QFont("Consolas", 10))
@@ -170,6 +146,8 @@ if _GUI_AVAILABLE:
                 QMainWindow { background-color: #121212; }
                 QWidget { background-color: #121212; color: #e0e0e0; }
                 QLabel { color: #e0e0e0; }
+                QComboBox { background-color: #1e1e1e; color: #e0e0e0; border: 1px solid #333; padding: 4px; }
+                QComboBox QAbstractItemView { background-color: #1e1e1e; color: #e0e0e0; selection-background-color: #29b6f6; }
                 QTextEdit { background-color: #1e1e1e; color: #b0bec5; border: 1px solid #333; }
                 QFrame { border: 1px solid #333; border-radius: 4px; }
                 QProgressBar { border: 1px solid #333; border-radius: 3px; }
@@ -189,12 +167,28 @@ if _GUI_AVAILABLE:
                 f"background-color: {bg}; color: {fg}; border-radius: 4px; padding: 6px;"
             )
 
-        # ----------------------------------------------------------------
-        # Worker setup
-        # ----------------------------------------------------------------
+        def _set_initial_dropdown(self, attack_mode: str) -> None:
+            mode_map = {"none": 0, "timeshift": 1, "blinding": 2, "zeroday": 3}
+            if attack_mode in mode_map:
+                self._attack_selector.setCurrentIndex(mode_map[attack_mode])
+
+        def _on_attack_changed(self, index: int) -> None:
+            mode_map = {0: "none", 1: "timeshift", 2: "blinding", 3: "zeroday"}
+            selected_mode = mode_map.get(index, "none")
+            
+            self._worker.stop()
+            self._worker.wait()
+            
+            self._status_label.setText("⬤  SWITCHING MODES...")
+            self._set_status_style("warning")
+            self._qber_history.clear()
+            self._qber_history.extend([0.0] * self._HISTORY_LEN)
+            self._qber_curve.setData(list(self._qber_history))
+            self._report_area.clear()
+            
+            self._start_worker(selected_mode)
 
         def _start_worker(self, attack_mode: str) -> None:
-            # FIX: Blinding requires the laser intensity to be spiked!
             intensity = "blinding" if attack_mode == "blinding" else "single_photon"
             
             self._worker = IDSWorker(attack_mode=attack_mode, intensity_mode=intensity)
@@ -202,12 +196,7 @@ if _GUI_AVAILABLE:
             self._worker.start()
             log.info(f"Dashboard: IDSWorker started (attack={attack_mode}, intensity={intensity})")
 
-        # ----------------------------------------------------------------
-        # Slot — called in GUI thread
-        # ----------------------------------------------------------------
-
         def _on_result(self, result: dict) -> None:
-            """Update all widgets from the inference result emitted by IDSWorker."""
             vitals      = result["vitals"]
             verdict     = result["verdict"]
             rf_pred     = result["rf_prediction"]
@@ -216,7 +205,6 @@ if _GUI_AVAILABLE:
             flagged     = result["flagged"]
             report      = result["report"]
 
-            # -- Status banner
             if verdict == "normal":
                 self._status_label.setText("⬤  SYSTEM SECURE")
                 self._set_status_style("normal")
@@ -227,31 +215,26 @@ if _GUI_AVAILABLE:
                 self._status_label.setText(f"⚠  ATTACK DETECTED — {rf_pred.upper()}")
                 self._set_status_style("critical")
 
-            # -- Live vitals
             self._voltage_lbl.setText(f"Voltage:  {vitals['voltage']:.2f} V")
             self._jitter_lbl.setText( f"Jitter:   {vitals['jitter']:.2f} ns")
             self._qber_lbl.setText(   f"QBER:     {vitals['qber']:.2%}")
 
-            # -- QBER rolling plot
             self._qber_history.append(vitals["qber"])
             self._qber_curve.setData(list(self._qber_history))
 
-            # -- Model readout
-            self._rf_label.setText(
-                f"RF: {rf_pred}  ({rf_conf:.1%})"
-            )
+            self._rf_label.setText(f"RF: {rf_pred}  ({rf_conf:.1%})")
+            
             svm_text  = "SVM: ANOMALY ⚠" if svm_anomaly else "SVM: NORMAL ✓"
             svm_color = "#ef5350" if svm_anomaly else "#4caf50"
             self._svm_label.setText(svm_text)
             self._svm_label.setStyleSheet(f"color: {svm_color};")
 
-            # -- Forensic report
             self._report_area.setPlainText(report)
 
         def closeEvent(self, event) -> None:
             log.info("Dashboard closing — stopping worker thread.")
             self._worker.stop()
-            self._worker.wait(3000)   # wait up to 3 s for clean shutdown
+            self._worker.wait(3000)   
             super().closeEvent(event)
 
 
@@ -259,9 +242,8 @@ if _GUI_AVAILABLE:
         parser = argparse.ArgumentParser(description="QKD Real-Time IDS Dashboard")
         parser.add_argument(
             "--attack",
-            choices=["none", "timeshift", "blinding"],
+            choices=["none", "timeshift", "blinding", "zeroday"],
             default="none",
-            help="Inject an attack mode for demonstration.",
         )
         args = parser.parse_args()
 

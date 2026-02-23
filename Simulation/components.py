@@ -71,6 +71,7 @@ class APD_Detector:
       - Dead time (10 µs)
       - Detector saturation in Blinding attack (flux > 10⁷ → ~9.0 V, ~0.1 ns jitter)
       - Temporal efficiency mismatch in Time-Shift attack (~0.05 ns jitter, 15% count rate)
+      - Zero-Day anomaly injection (~6.5 V, ~2.8 ns jitter, 25% count rate)
       - Normal Geiger-mode operation (~3.3 V, ~1.2 ns jitter, 25% efficiency)
     """
 
@@ -84,7 +85,7 @@ class APD_Detector:
         self.current_jitter: float   = 0.0
 
     def set_attack_mode(self, mode: str) -> None:
-        """Set the operating mode: 'none', 'timeshift', or implicitly 'blinding' (via flux)."""
+        """Set the operating mode: 'none', 'timeshift', 'zeroday', or implicitly 'blinding' (via flux)."""
         self.attack_mode = mode
 
     def detect(
@@ -137,6 +138,15 @@ class APD_Detector:
             self.current_voltage = float(np.random.normal(3.3, 0.2))
             self.current_jitter  = float(np.random.normal(CONSTANTS['jitter_attack_ns'], 0.01))
             if np.random.random() < 0.15:     # only 15% of pulses hit the gate
+                self.last_click_time = current_time
+                return measurement
+            return None
+
+        # -- Zero-Day anomaly injection ---------------------------------------
+        elif self.attack_mode == "zeroday":
+            self.current_voltage = float(np.random.normal(6.5, 0.1))
+            self.current_jitter  = float(np.random.normal(2.8, 0.1))
+            if np.random.random() < 0.25:
                 self.last_click_time = current_time
                 return measurement
             return None
