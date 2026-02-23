@@ -1,32 +1,10 @@
-"""
-Simulation/explain_logic.py
-Deterministic forensic text reporter.
-Translates a model prediction and live APD hardware vitals into a human-readable
-incident report grounding the AI's decision in physical causation.
-"""
 __author__ = "Rahul Rajesh 2360445"
 
-
 def analyze_incident(prediction: str, vitals: dict[str, float]) -> str:
-    """
-    Generate a deterministic forensic incident report from a model prediction
-    and real-time hardware telemetry readings.
-
-    Args:
-        prediction: Model's class label string — one of:
-                    'normal', 'attack_blinding', 'attack_timeshift',
-                    'attack_intercept'.
-        vitals:     Dictionary with keys:
-                    'voltage'  — mean APD bias voltage reading (Volts)
-                    'jitter'   — mean timing jitter reading (nanoseconds)
-                    'qber'     — current QBER (float in [0.0, 1.0])
-
-    Returns:
-        Multi-line forensic report string suitable for logging or GUI display.
-    """
     v: float = vitals['voltage']
     j: float = vitals['jitter']
     q: float = vitals['qber']
+    c: float = vitals.get('count_rate', 1.0)
 
     report: list[str] = []
     report.append(f"FORENSIC ANALYSIS: [{prediction.upper()}]")
@@ -56,9 +34,9 @@ def analyze_incident(prediction: str, vitals: dict[str, float]) -> str:
                 f"  - Evidence A: Unnatural Precision ({j:.2f} ns). "
                 "Real thermal jitter should be >1.0 ns."
             )
-        if v < 0.6:
+        if c < 0.20:
             report.append(
-                f"  - Evidence B: Low Count Rate ({v:.2f} V). "
+                f"  - Evidence B: Low Count Rate ({c:.2%}). "
                 "Pulses are hitting the detector gate edge."
             )
         report.append(
@@ -102,8 +80,6 @@ def analyze_incident(prediction: str, vitals: dict[str, float]) -> str:
         report.append(f"UNKNOWN CLASSIFICATION: '{prediction}'")
         report.append("  - Action: Manual inspection required.")
 
-    # Cross-feature anomaly flag — high voltage but normal jitter suggests
-    # hardware malfunction or solar/RF interference, not a blinding attack
     if prediction != "attack_blinding" and v > 5.0 and j > 1.0:
         report.append(
             "ANOMALY: High Voltage but Normal Jitter detected. "

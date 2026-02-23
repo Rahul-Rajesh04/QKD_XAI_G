@@ -28,12 +28,6 @@ def load_ai_brain():
     return model
 
 def run_lab_experiment(label: str, intensity_mode: str, attack_mode: str = "none", apply_noise: bool = False):
-    """
-    Simulate a BB84 key exchange and return the AI feature vector.
-
-    Uses genuinely random Alice/Bob bases so qber_rectilinear and qber_diagonal
-    are computed from independent measurement sets, mirroring data_preprocessing.py.
-    """
     laser   = hardware.LaserSource()
     bob_spd = hardware.APD_Detector()
     bob_spd.set_attack_mode(attack_mode)
@@ -58,7 +52,6 @@ def run_lab_experiment(label: str, intensity_mode: str, attack_mode: str = "none
         b_basis   = int(np.random.randint(0, 2))
         basis_str = 'rectilinear' if b_basis == 0 else 'diagonal'
 
-        # 15 µs > 10 µs APD dead time — ensures count rate matches training distributions
         current_time_sim = i * 15e-6
 
         res = bob_spd.detect(q_state, flux, basis_str, current_time_sim)
@@ -77,7 +70,6 @@ def run_lab_experiment(label: str, intensity_mode: str, attack_mode: str = "none
     avg_voltage = float(np.mean(voltages))
     avg_jitter  = float(np.mean(jitters))
 
-    # Sift and compute per-basis QBER (mirrors data_preprocessing.py)
     ab = np.array(alice_bits_l);  aB = np.array(alice_bases_l)
     bb = np.array(bob_bits_l);    bB = np.array(bob_bases_l)
 
@@ -103,10 +95,9 @@ def run_lab_experiment(label: str, intensity_mode: str, attack_mode: str = "none
     return ai_input, float(qber_o), avg_voltage, avg_jitter, n_sifted
 
 
-
 def main():
     print("\n" + "="*70)
-    print("      QUANTUM LAB: PHYSICS vs AI SHOWDOWN (HIGH STATS MODE)")
+    print("       QUANTUM LAB: PHYSICS vs AI SHOWDOWN (HIGH STATS MODE)")
     print("="*70)
     ai_model = load_ai_brain()
     summary_report = []
@@ -128,7 +119,8 @@ def main():
 
         pred = ai_model.predict(input_data)[0]
         
-        vitals = {'voltage': v, 'jitter': j, 'qber': qber}
+        c_rate = input_data['photon_count_rate'][0]
+        vitals = {'voltage': v, 'jitter': j, 'qber': qber, 'count_rate': float(c_rate)}
         report = explain_logic.analyze_incident(pred, vitals)
         print("\n" + report)
         

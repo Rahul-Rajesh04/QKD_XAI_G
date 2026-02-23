@@ -194,10 +194,13 @@ if _GUI_AVAILABLE:
         # ----------------------------------------------------------------
 
         def _start_worker(self, attack_mode: str) -> None:
-            self._worker = IDSWorker(attack_mode=attack_mode)
+            # FIX: Blinding requires the laser intensity to be spiked!
+            intensity = "blinding" if attack_mode == "blinding" else "single_photon"
+            
+            self._worker = IDSWorker(attack_mode=attack_mode, intensity_mode=intensity)
             self._worker.result_ready.connect(self._on_result)
             self._worker.start()
-            log.info(f"Dashboard: IDSWorker started (attack_mode={attack_mode})")
+            log.info(f"Dashboard: IDSWorker started (attack={attack_mode}, intensity={intensity})")
 
         # ----------------------------------------------------------------
         # Slot — called in GUI thread
