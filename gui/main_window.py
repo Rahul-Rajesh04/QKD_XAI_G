@@ -1,3 +1,5 @@
+__author__ = "Rahul Rajesh 2360445"
+
 import sys
 import os
 import argparse
@@ -22,7 +24,7 @@ try:
         QTextEdit, QProgressBar, QSplitter,
         QFrame, QComboBox, QTabWidget, QPushButton, QMessageBox, QSlider
     )
-    from PyQt6.QtCore import Qt
+    from PyQt6.QtCore import Qt, QTimer
     from PyQt6.QtGui import QFont, QPixmap
     import pyqtgraph as pg        
     _GUI_AVAILABLE = True
@@ -32,6 +34,7 @@ except ImportError as exc:
 
 if _GUI_AVAILABLE:
     from gui.worker_thread import IDSWorker
+    from utils.pdf_export import generate_incident_report
 
     class IDSDashboard(QMainWindow):
 
@@ -40,7 +43,8 @@ if _GUI_AVAILABLE:
         _COLORS = {
             "normal":   ("#051a0f", "#00ff66"),   
             "warning":  ("#1a1500", "#fcee0a"),   
-            "critical": ("#1a0505", "#ff003c"),   
+            "critical": ("#1a0505", "#ff003c"),
+            "critical_dim": ("#330000", "#ff003c")
         }
 
         def __init__(self, attack_mode: str = "none") -> None:
@@ -54,6 +58,17 @@ if _GUI_AVAILABLE:
             
             self._last_abort_log_time = 0.0
             self._last_warn_log_time = 0.0
+            
+            self._last_attack_data = None
+            
+            self._header_flash_timer = QTimer()
+            self._header_flash_timer.timeout.connect(self._toggle_header_flash)
+            self._header_is_bright = True
+            
+            self._summary_flash_timer = QTimer()
+            self._summary_flash_timer.timeout.connect(self._toggle_summary_flash)
+            self._summary_is_red = True
+            self._current_summary_html = ""
 
             self._init_environmental_logs()
             self._build_ui()
@@ -63,13 +78,11 @@ if _GUI_AVAILABLE:
         def _init_environmental_logs(self) -> None:
             self._degradation_log = os.path.join(_PROJECT_ROOT, "logs", "channel_degradation.csv")
             self._abort_log = os.path.join(_PROJECT_ROOT, "logs", "critical_aborts.csv")
-            
             os.makedirs(os.path.dirname(self._degradation_log), exist_ok=True)
             
             if not os.path.exists(self._degradation_log):
                 with open(self._degradation_log, 'w', newline='', encoding='utf-8') as f:
                     csv.writer(f).writerow(["Timestamp", "Warning_Type", "Live_QBER", "Noise_Threshold", "Voltage", "Jitter"])
-                    
             if not os.path.exists(self._abort_log):
                 with open(self._abort_log, 'w', newline='', encoding='utf-8') as f:
                     csv.writer(f).writerow(["Timestamp", "Event_Type", "Live_QBER", "Abort_Threshold", "Voltage", "Jitter"])
@@ -115,6 +128,17 @@ if _GUI_AVAILABLE:
             ])
             self._attack_selector.currentIndexChanged.connect(self._on_attack_changed)
             
+            self._latest_vitals = {}
+            self._latest_result = {}
+            self._latest_report_text = ""
+            self._latest_image_path = None
+
+            self._export_btn = QPushButton("Export Forensic Report")
+            self._export_btn.setObjectName("dangerBtn")
+            self._export_btn.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+            self._export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._export_btn.clicked.connect(self._export_report)
+
             self._clear_btn = QPushButton("Clear All Logs")
             self._clear_btn.setObjectName("dangerBtn")
             self._clear_btn.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
@@ -124,6 +148,8 @@ if _GUI_AVAILABLE:
             control_layout.addWidget(control_label)
             control_layout.addWidget(self._attack_selector)
             control_layout.addStretch()
+            control_layout.addWidget(self._export_btn)
+            control_layout.addSpacing(10)
             control_layout.addWidget(self._clear_btn)
             
             top_controls_layout.addWidget(control_panel)
@@ -135,6 +161,7 @@ if _GUI_AVAILABLE:
             self._noise_lbl = QLabel("Noise Floor: 4.0%")
             self._noise_lbl.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
             self._noise_slider = QSlider(Qt.Orientation.Horizontal)
+            self._noise_slider.setMinimumWidth(150)
             self._noise_slider.setRange(0, 300)
             self._noise_slider.setValue(40)
             self._noise_slider.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -143,6 +170,7 @@ if _GUI_AVAILABLE:
             self._abort_lbl = QLabel("Abort Threshold: 11.0%")
             self._abort_lbl.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
             self._abort_slider = QSlider(Qt.Orientation.Horizontal)
+            self._abort_slider.setMinimumWidth(150)
             self._abort_slider.setRange(0, 300)
             self._abort_slider.setValue(110)
             self._abort_slider.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -185,7 +213,7 @@ if _GUI_AVAILABLE:
             self._fill_bar = QProgressBar()
             self._fill_bar.setMaximum(500)
             self._fill_bar.setTextVisible(False)
-            self._fill_bar.setFixedHeight(6)
+            self._fill_bar.setFixedHeight(8)
             vitals_layout.addWidget(fill_label)
             vitals_layout.addWidget(self._fill_bar)
 
@@ -201,8 +229,11 @@ if _GUI_AVAILABLE:
             self._plot_widget.getAxis("left").enableAutoSIPrefix(False)
             self._plot_widget.getAxis("left").setPen(pg.mkPen(color="#333333"))
             self._plot_widget.getAxis("bottom").setPen(pg.mkPen(color="#333333"))
-            self._plot_widget.setLabel("left",   "QBER")
-            self._plot_widget.setLabel("bottom", "Window index")
+            
+            label_styles = {'color': '#e0e0e0', 'font-size': '11pt', 'font-weight': 'bold'}
+            self._plot_widget.setLabel("left", "QBER (%)", **label_styles)
+            self._plot_widget.setLabel("bottom", "Time (Sliding Window)", **label_styles)
+            
             self._plot_widget.showGrid(x=True, y=True, alpha=0.2)
             self._plot_widget.setMouseEnabled(x=False, y=False)
             self._plot_widget.hideButtons()
@@ -243,7 +274,6 @@ if _GUI_AVAILABLE:
             self._report_area = QTextEdit()
             self._report_area.setReadOnly(True)
             self._report_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            self._report_area.setFont(QFont("Consolas", 10))
             self._report_area.setFixedHeight(140)
             self._report_area.setPlaceholderText("Forensic ML narrative will stream here...")
             bottom_layout.addWidget(self._report_area)
@@ -266,105 +296,52 @@ if _GUI_AVAILABLE:
                 QMainWindow { background-color: #050505; }
                 QWidget { color: #e0e0e0; font-family: 'Consolas', monospace; }
                 
-                QFrame#panel { 
-                    background-color: #0a0a0a; 
-                    border: 1px solid #1f1f1f; 
-                    border-radius: 4px; 
-                }
+                QFrame#panel { background-color: #0a0a0a; border: 1px solid #1f1f1f; border-radius: 4px; }
                 
                 QComboBox { 
-                    background-color: #0f0f0f; 
-                    color: #ff003c; 
-                    border: 1px solid #333333; 
-                    padding: 6px 12px; 
-                    border-radius: 2px; 
-                }
-                QComboBox::drop-down { border: none; }
-                QComboBox QAbstractItemView { 
-                    background-color: #0f0f0f; 
-                    color: #e0e0e0; 
-                    selection-background-color: #ff003c; 
-                    selection-color: #000000;
-                    border: 1px solid #333333;
-                }
-                
-                QPushButton#dangerBtn { 
-                    background-color: #1a0505; 
-                    color: #ff003c; 
-                    border: 1px solid #ff003c; 
-                    padding: 6px 16px; 
-                    border-radius: 2px; 
-                }
-                QPushButton#dangerBtn:hover { 
-                    background-color: #ff003c; 
-                    color: #000000;
-                }
-                
-                QTextEdit { 
                     background-color: #0a0a0a; 
-                    color: #00ff66; 
-                    border: 1px solid #1f1f1f; 
-                    border-radius: 2px;
-                    padding: 8px;
-                }
-                
-                QProgressBar { 
-                    border: 1px solid #1f1f1f; 
-                    background-color: #050505; 
-                    border-radius: 2px; 
-                }
-                QProgressBar::chunk { 
-                    background-color: #00f0ff; 
-                    width: 4px;
-                    margin: 0.5px;
-                }
-                
-                QTabWidget::pane { border: 1px solid #1f1f1f; border-radius: 4px; top: -1px; }
-                QTabBar::tab { 
-                    background: #0a0a0a; 
-                    color: #777777; 
-                    padding: 10px 20px; 
-                    border: 1px solid #1f1f1f;
-                    border-bottom: none;
-                    border-top-left-radius: 4px;
-                    border-top-right-radius: 4px;
-                    margin-right: 2px;
+                    color: #ff003c; 
+                    border: 2px solid #ff003c; 
+                    padding: 6px 12px; 
+                    border-radius: 4px; 
                     font-weight: bold;
                 }
-                QTabBar::tab:selected { 
-                    background: #ff003c; 
-                    color: #000000; 
-                    border: 1px solid #ff003c;
+                QComboBox::drop-down { 
+                    border-left: 1px solid #ff003c;
+                    width: 25px;
+                }
+                QComboBox QAbstractItemView { 
+                    background-color: #050505; 
+                    color: #e0e0e0; 
+                    selection-background-color: #ff003c; 
+                    selection-color: #000000; 
+                    border: 1px solid #ff003c; 
                 }
                 
+                QPushButton#dangerBtn { background-color: #1a0505; color: #ff003c; border: 1px solid #ff003c; padding: 6px 16px; border-radius: 2px; font-weight: bold; }
+                QPushButton#dangerBtn:hover { background-color: #ff003c; color: #000000; }
+                QPushButton#dangerBtn:pressed { background-color: #cc0030; color: #ffffff; border: 1px solid #cc0030; padding-top: 8px; padding-bottom: 4px; }
+                
+                QTextEdit { background-color: #0a0a0a; color: #00ff66; border: 1px solid #1f1f1f; border-radius: 2px; padding: 8px; }
+                
+                QProgressBar { border: 1px solid #1f1f1f; background-color: #050505; border-radius: 2px; }
+                QProgressBar::chunk { background-color: #00f0ff; width: 4px; margin: 0.5px; }
+                
+                QTabWidget::pane { border: 1px solid #1f1f1f; border-radius: 4px; top: -1px; }
+                QTabBar::tab { background: #0a0a0a; color: #777777; padding: 10px 20px; border: 1px solid #1f1f1f; border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px; margin-right: 2px; font-weight: bold; }
+                QTabBar::tab:selected { background: #ff003c; color: #000000; border: 1px solid #ff003c; }
+                
                 QSlider { min-height: 24px; }
-                QSlider::groove:horizontal { 
-                    border: none; 
-                    height: 4px; 
-                    background: #1f1f1f; 
-                    border-radius: 2px; 
-                }
-                QSlider::handle:horizontal { 
-                    background: #ff003c; 
-                    border: none; 
-                    width: 16px; 
-                    height: 16px; 
-                    margin: -6px 0; 
-                    border-radius: 8px; 
-                }
-                QSlider::sub-page:horizontal {
-                    background: #ff003c;
-                    border-radius: 2px;
-                }
+                QSlider::groove:horizontal { border: none; height: 4px; background: #1f1f1f; border-radius: 2px; }
+                QSlider::handle:horizontal { background: #ff003c; border: none; width: 16px; height: 16px; margin: -6px 0; border-radius: 8px; }
+                QSlider::sub-page:horizontal { background: #ff003c; border-radius: 2px; }
             """)
 
         def _update_thresholds(self) -> None:
             noise_val = self._noise_slider.value() / 1000.0
             abort_val = self._abort_slider.value() / 1000.0
-            
             self._noise_lbl.setText(f"Noise Floor: {noise_val*100:.1f}%")
             self._abort_lbl.setText(f"Abort Threshold: {abort_val*100:.1f}%")
-            
             self._noise_line.setValue(noise_val)
             self._abort_line.setValue(abort_val)
 
@@ -377,9 +354,20 @@ if _GUI_AVAILABLE:
 
         def _set_status_style(self, level: str) -> None:
             bg, fg = self._COLORS.get(level, self._COLORS["warning"])
-            self._status_label.setStyleSheet(
-                f"background-color: {bg}; color: {fg}; border: 1px solid {fg}; border-radius: 2px; padding: 6px; letter-spacing: 1px;"
-            )
+            self._status_label.setStyleSheet(f"background-color: {bg}; color: {fg}; border: 1px solid {fg}; border-radius: 2px; padding: 6px; letter-spacing: 1px;")
+
+        def _toggle_header_flash(self) -> None:
+            self._header_is_bright = not self._header_is_bright
+            if self._header_is_bright:
+                self._set_status_style("critical")
+            else:
+                self._set_status_style("critical_dim")
+
+        def _toggle_summary_flash(self) -> None:
+            self._summary_is_red = not self._summary_is_red
+            text_color = "#ff003c" if self._summary_is_red else "#fcee0a"
+            final_html = f"<div style='color: {text_color}; font-family: Consolas; font-size: 10pt;'>{self._current_summary_html}</div>"
+            self._report_area.setHtml(final_html)
 
         def _set_initial_dropdown(self, attack_mode: str) -> None:
             mode_map = {"none": 0, "timeshift": 1, "blinding": 2, "zeroday": 3}
@@ -392,6 +380,8 @@ if _GUI_AVAILABLE:
             
             self._worker.stop()
             self._worker.wait()
+            self._header_flash_timer.stop()
+            self._summary_flash_timer.stop()
             
             self._status_label.setText("[ SWITCHING MODES... ]")
             self._set_status_style("warning")
@@ -405,29 +395,54 @@ if _GUI_AVAILABLE:
             
             self._start_worker(selected_mode)
 
+        def _export_report(self) -> None:
+            target_data = self._last_attack_data if self._last_attack_data else {
+                "vitals": {"voltage": 3.3, "jitter": 1.2, "qber": 0.0},
+                "verdict": "SYSTEM SECURE",
+                "rf_prediction": "NORMAL",
+                "rf_confidence": 1.0,
+                "svm_anomaly": False,
+                "class_probs": {},
+                "report": "SYSTEM SECURE\nNo critical incidents registered in memory.",
+                "image_path": None
+            }
+                
+            filepath = generate_incident_report(
+                vitals=target_data["vitals"],
+                verdict=target_data["verdict"],
+                rf_pred=target_data["rf_prediction"],
+                rf_conf=target_data["rf_confidence"],
+                svm_anomaly=target_data["svm_anomaly"],
+                class_probs=target_data["class_probs"],
+                report_text=target_data["report"],
+                image_path=target_data["image_path"]
+            )
+            QMessageBox.information(self, "Report Exported", f"Forensic PDF saved successfully to:\n{filepath}")
+
         def _clear_logs(self) -> None:
             log_dir = os.path.join(_PROJECT_ROOT, "logs")
             os.makedirs(log_dir, exist_ok=True)
             
             with open(os.path.join(log_dir, "threat_telemetry.csv"), 'w', newline='', encoding='utf-8') as f:
                 csv.writer(f).writerow(["Timestamp", "System_Verdict", "Detected_Signature", "Confidence", "SVM_Triggered", "Voltage", "Jitter", "QBER"])
-            
             with open(self._degradation_log, 'w', newline='', encoding='utf-8') as f:
                 csv.writer(f).writerow(["Timestamp", "Warning_Type", "Live_QBER", "Noise_Threshold", "Voltage", "Jitter"])
-                
             with open(self._abort_log, 'w', newline='', encoding='utf-8') as f:
                 csv.writer(f).writerow(["Timestamp", "Event_Type", "Live_QBER", "Abort_Threshold", "Voltage", "Jitter"])
                 
+            self._last_attack_data = None
             QMessageBox.information(self, "Logs Cleared", "All telemetry, degradation, and abort logs have been successfully wiped and reset.")
 
         def _start_worker(self, attack_mode: str) -> None:
             intensity = "blinding" if attack_mode == "blinding" else "single_photon"
-            
             self._worker = IDSWorker(attack_mode=attack_mode, intensity_mode=intensity)
             self._worker.result_ready.connect(self._on_result)
             self._worker.start()
 
         def _on_result(self, result: dict) -> None:
+            if "ZERO-DAY" in result["verdict"]:
+                result["report"] = "FORENSIC ANALYSIS: [ZERO-DAY_ANOMALY]\nCRITICAL THREAT: UNCLASSIFIED PHYSICAL PERTURBATION\nReasoning: The Anomaly Engine (SVM) detected out-of-distribution hardware telemetry.\n- Status: Signature Engine (RF) failed to match known attack vectors.\n- Conclusion: Potential novel attack or severe hardware malfunction. Escalate immediately."
+
             vitals      = result["vitals"]
             verdict     = result["verdict"]
             rf_pred     = result["rf_prediction"]
@@ -436,67 +451,65 @@ if _GUI_AVAILABLE:
             flagged     = result["flagged"]
             report      = result["report"]
 
-            self._fill_bar.setValue(500)
-
             noise_threshold = self._noise_slider.value() / 1000.0
             abort_threshold = self._abort_slider.value() / 1000.0
             current_qber = vitals["qber"]
             
             is_qber_abort = current_qber >= abort_threshold
             is_noise_warning = current_qber > noise_threshold and not is_qber_abort
+            is_attack = verdict != "normal"
+
+            img_path = None
+            if not is_qber_abort and not is_noise_warning:
+                if rf_pred == "attack_blinding" and flagged:
+                    img_path = os.path.join(_PROJECT_ROOT, "Results", "Forensic_Evidence", "Evidence_Blinding_Attack_Summary.png")
+                elif rf_pred == "attack_timeshift" and flagged:
+                    img_path = os.path.join(_PROJECT_ROOT, "Results", "Forensic_Evidence", "Evidence_TimeShift_Attack_Summary.png")
+
+            if is_attack or is_qber_abort:
+                self._last_attack_data = {
+                    "vitals": vitals,
+                    "verdict": verdict,
+                    "rf_prediction": rf_pred,
+                    "rf_confidence": rf_conf,
+                    "svm_anomaly": svm_anomaly,
+                    "class_probs": result["class_probs"],
+                    "report": report,
+                    "image_path": img_path
+                }
+
+            self._fill_bar.setValue(500)
 
             if is_qber_abort:
+                self._summary_flash_timer.stop()
                 self._status_label.setText(f"[ CRITICAL ABORT: QBER EXCEEDS {abort_threshold:.1%} ]")
-                self._set_status_style("critical")
-                self._xai_image_label.clear()
-                self._xai_image_label.setText("Connection Aborted: High QBER threshold breached.")
                 report = f"CRITICAL SYSTEM ABORT\nLive QBER ({current_qber:.2%}) exceeds the dynamic abort threshold ({abort_threshold:.1%}).\nKey generation suspended to prevent eavesdropping."
-                
-                if time.time() - self._last_abort_log_time > 5.0:
-                    with open(self._abort_log, 'a', newline='', encoding='utf-8') as f:
-                        csv.writer(f).writerow([
-                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "THRESHOLD_BREACH_ABORT",
-                            f"{current_qber*100:.2f}%",
-                            f"{abort_threshold*100:.1f}%",
-                            f"{vitals['voltage']:.2f} V",
-                            f"{vitals['jitter']:.3f} ns"
-                        ])
-                    self._last_abort_log_time = time.time()
-
-            elif "ZERO-DAY" in verdict:
-                self._status_label.setText(f"[ {verdict} ]")
+                if not self._header_flash_timer.isActive():
+                    self._header_flash_timer.start(400)
+            elif is_attack and is_noise_warning:
+                self._header_flash_timer.stop()
                 self._set_status_style("critical")
-                self._xai_image_label.clear()
-                self._xai_image_label.setText("Zero-Day Anomaly Detected.\nNo pre-computed SHAP evidence available for unclassified threats.")
-            elif verdict != "normal":
-                self._status_label.setText(f"[ ATTACK DETECTED: {rf_pred.upper()} ]")
-                self._set_status_style("critical")
-
+                attack_name = verdict if "ZERO-DAY" in verdict else rf_pred.upper()
+                self._status_label.setText(f"[ ATTACK DETECTED: {attack_name} | + CHANNEL-DEGRADATION ]")
+                if not self._summary_flash_timer.isActive():
+                    self._summary_flash_timer.start(400)
+            elif is_attack:
+                self._summary_flash_timer.stop()
+                attack_name = verdict if "ZERO-DAY" in verdict else rf_pred.upper()
+                self._status_label.setText(f"[ ATTACK DETECTED: {attack_name} ]")
+                if not self._header_flash_timer.isActive():
+                    self._header_flash_timer.start(400)
             elif is_noise_warning:
-                self._status_label.setText("[ WARNING: ELEVATED CHANNEL NOISE ]")
+                self._header_flash_timer.stop()
+                self._summary_flash_timer.stop()
                 self._set_status_style("warning")
-                self._xai_image_label.clear()
-                self._xai_image_label.setText(f"No attack detected, but channel noise ({current_qber:.2%}) exceeds baseline ({noise_threshold:.1%}).")
+                self._status_label.setText("[ WARNING: ELEVATED CHANNEL NOISE ]")
                 report = f"ELEVATED NOISE WARNING\nLive QBER is above the expected baseline.\nThis indicates fiber degradation, temperature fluctuation, or misalignment.\nSecure key rate is degraded."
-                
-                if time.time() - self._last_warn_log_time > 5.0:
-                    with open(self._degradation_log, 'a', newline='', encoding='utf-8') as f:
-                        csv.writer(f).writerow([
-                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "ELEVATED_NOISE_WARNING",
-                            f"{current_qber*100:.2f}%",
-                            f"{noise_threshold*100:.1f}%",
-                            f"{vitals['voltage']:.2f} V",
-                            f"{vitals['jitter']:.3f} ns"
-                        ])
-                    self._last_warn_log_time = time.time()
-                    
             else:
-                self._status_label.setText("[ SYSTEM SECURE ]")
+                self._header_flash_timer.stop()
+                self._summary_flash_timer.stop()
                 self._set_status_style("normal")
-                self._xai_image_label.clear()
-                self._xai_image_label.setText("System Secure. No active anomalies.")
+                self._status_label.setText("[ SYSTEM SECURE ]")
 
             self._voltage_lbl.setText(f"Voltage:  {vitals['voltage']:>5.2f} V")
             self._jitter_lbl.setText( f"Jitter:   {vitals['jitter']:>5.2f} ns")
@@ -512,19 +525,21 @@ if _GUI_AVAILABLE:
             self._svm_label.setText(svm_text)
             self._svm_label.setStyleSheet(f"color: {svm_color};")
 
-            self._report_area.setPlainText(report)
+            html_report = report.replace('\n', '<br>')
+            keywords_to_bold = ["FORENSIC ANALYSIS:", "CRITICAL THREAT:", "SYSTEM SECURE", "Reasoning:", "Evidence A:", "Evidence B:", "Conclusion:", "Status:", "ANOMALY:", "CRITICAL SYSTEM ABORT", "ELEVATED NOISE WARNING"]
+            for kw in keywords_to_bold:
+                html_report = html_report.replace(kw, f"<b>{kw}</b>")
 
-            if not is_qber_abort and not is_noise_warning:
-                if rf_pred == "attack_blinding" and flagged:
-                    img_path = os.path.join(_PROJECT_ROOT, "Results", "Forensic_Evidence", "Evidence_Blinding_Attack_Summary.png")
-                    if os.path.exists(img_path):
-                        pixmap = QPixmap(img_path)
-                        self._xai_image_label.setPixmap(pixmap.scaled(1000, 600, Qt.AspectRatioMode.KeepAspectRatio))
-                elif rf_pred == "attack_timeshift" and flagged:
-                    img_path = os.path.join(_PROJECT_ROOT, "Results", "Forensic_Evidence", "Evidence_TimeShift_Attack_Summary.png")
-                    if os.path.exists(img_path):
-                        pixmap = QPixmap(img_path)
-                        self._xai_image_label.setPixmap(pixmap.scaled(1000, 600, Qt.AspectRatioMode.KeepAspectRatio))
+            self._current_summary_html = html_report
+            if not self._summary_flash_timer.isActive():
+                text_color = "#ff003c" if (is_attack or is_qber_abort) else "#00ff66"
+                if is_noise_warning and not is_attack and not is_qber_abort: text_color = "#fcee0a"
+                final_html = f"<div style='color: {text_color}; font-family: Consolas; font-size: 10pt;'>{html_report}</div>"
+                self._report_area.setHtml(final_html)
+
+            if img_path and os.path.exists(img_path):
+                pixmap = QPixmap(img_path)
+                self._xai_image_label.setPixmap(pixmap.scaled(1000, 600, Qt.AspectRatioMode.KeepAspectRatio))
 
         def closeEvent(self, event) -> None:
             self._worker.stop()
@@ -533,11 +548,7 @@ if _GUI_AVAILABLE:
 
     def main() -> None:
         parser = argparse.ArgumentParser(description="QKD Real-Time IDS Dashboard")
-        parser.add_argument(
-            "--attack",
-            choices=["none", "timeshift", "blinding", "zeroday"],
-            default="none",
-        )
+        parser.add_argument("--attack", choices=["none", "timeshift", "blinding", "zeroday"], default="none")
         args = parser.parse_args()
 
         app = QApplication(sys.argv)
