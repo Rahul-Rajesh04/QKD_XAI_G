@@ -5,7 +5,6 @@ import os
 import argparse
 import collections
 import csv
-import time
 from datetime import datetime
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -30,7 +29,7 @@ try:
     _GUI_AVAILABLE = True
 except ImportError as exc:
     _GUI_AVAILABLE = False
-    log.error(f"GUI dependencies not available. Run: pip install PyQt6 pyqtgraph")
+    log.error(f"GUI dependencies not available.")
 
 if _GUI_AVAILABLE:
     from gui.worker_thread import IDSWorker
@@ -78,6 +77,8 @@ if _GUI_AVAILABLE:
         def _init_environmental_logs(self) -> None:
             self._degradation_log = os.path.join(_PROJECT_ROOT, "logs", "channel_degradation.csv")
             self._abort_log = os.path.join(_PROJECT_ROOT, "logs", "critical_aborts.csv")
+            self._telemetry_log = os.path.join(_PROJECT_ROOT, "logs", "threat_telemetry.csv")
+            
             os.makedirs(os.path.dirname(self._degradation_log), exist_ok=True)
             
             if not os.path.exists(self._degradation_log):
@@ -86,6 +87,9 @@ if _GUI_AVAILABLE:
             if not os.path.exists(self._abort_log):
                 with open(self._abort_log, 'w', newline='', encoding='utf-8') as f:
                     csv.writer(f).writerow(["Timestamp", "Event_Type", "Live_QBER", "Abort_Threshold", "Voltage", "Jitter"])
+            if not os.path.exists(self._telemetry_log):
+                with open(self._telemetry_log, 'w', newline='', encoding='utf-8') as f:
+                    csv.writer(f).writerow(["Timestamp", "System_Verdict", "Detected_Signature", "Confidence", "SVM_Triggered", "Voltage", "Jitter", "QBER"])
 
         def _create_panel(self) -> QFrame:
             frame = QFrame()
@@ -404,7 +408,9 @@ if _GUI_AVAILABLE:
                 "svm_anomaly": False,
                 "class_probs": {},
                 "report": "SYSTEM SECURE\nNo critical incidents registered in memory.",
-                "image_path": None
+                "image_path": None,
+                "is_noise_warning": False,
+                "is_qber_abort": False
             }
                 
             filepath = generate_incident_report(
@@ -413,9 +419,11 @@ if _GUI_AVAILABLE:
                 rf_pred=target_data["rf_prediction"],
                 rf_conf=target_data["rf_confidence"],
                 svm_anomaly=target_data["svm_anomaly"],
-                class_probs=target_data["class_probs"],
+                class_probs=target_data.get("class_probs", {}),
                 report_text=target_data["report"],
-                image_path=target_data["image_path"]
+                image_path=target_data.get("image_path"),
+                is_noise_warning=target_data.get("is_noise_warning", False),
+                is_qber_abort=target_data.get("is_qber_abort", False)
             )
             QMessageBox.information(self, "Report Exported", f"Forensic PDF saved successfully to:\n{filepath}")
 
@@ -423,7 +431,7 @@ if _GUI_AVAILABLE:
             log_dir = os.path.join(_PROJECT_ROOT, "logs")
             os.makedirs(log_dir, exist_ok=True)
             
-            with open(os.path.join(log_dir, "threat_telemetry.csv"), 'w', newline='', encoding='utf-8') as f:
+            with open(self._telemetry_log, 'w', newline='', encoding='utf-8') as f:
                 csv.writer(f).writerow(["Timestamp", "System_Verdict", "Detected_Signature", "Confidence", "SVM_Triggered", "Voltage", "Jitter", "QBER"])
             with open(self._degradation_log, 'w', newline='', encoding='utf-8') as f:
                 csv.writer(f).writerow(["Timestamp", "Warning_Type", "Live_QBER", "Noise_Threshold", "Voltage", "Jitter"])
@@ -440,106 +448,135 @@ if _GUI_AVAILABLE:
             self._worker.start()
 
         def _on_result(self, result: dict) -> None:
-            if "ZERO-DAY" in result["verdict"]:
-                result["report"] = "FORENSIC ANALYSIS: [ZERO-DAY_ANOMALY]\nCRITICAL THREAT: UNCLASSIFIED PHYSICAL PERTURBATION\nReasoning: The Anomaly Engine (SVM) detected out-of-distribution hardware telemetry.\n- Status: Signature Engine (RF) failed to match known attack vectors.\n- Conclusion: Potential novel attack or severe hardware malfunction. Escalate immediately."
+            try:
+                if "ZERO-DAY" in result.get("verdict", ""):
+                    result["report"] = "FORENSIC ANALYSIS: [ZERO-DAY_ANOMALY]\nCRITICAL THREAT: UNCLASSIFIED PHYSICAL PERTURBATION\nReasoning: The Anomaly Engine (SVM) detected out-of-distribution hardware telemetry.\n- Status: Signature Engine (RF) failed to match known attack vectors.\n- Conclusion: Potential novel attack or severe hardware malfunction. Escalate immediately."
 
-            vitals      = result["vitals"]
-            verdict     = result["verdict"]
-            rf_pred     = result["rf_prediction"]
-            rf_conf     = result["rf_confidence"]
-            svm_anomaly = result["svm_anomaly"]
-            flagged     = result["flagged"]
-            report      = result["report"]
+                vitals      = result.get("vitals", {"voltage": 3.3, "jitter": 1.2, "qber": 0.0})
+                verdict     = result.get("verdict", "normal")
+                rf_pred     = result.get("rf_prediction", "normal")
+                rf_conf     = result.get("rf_confidence", 1.0)
+                svm_anomaly = result.get("svm_anomaly", False)
+                report      = result.get("report", "SYSTEM SECURE")
+                class_probs = result.get("class_probs", {})
 
-            noise_threshold = self._noise_slider.value() / 1000.0
-            abort_threshold = self._abort_slider.value() / 1000.0
-            current_qber = vitals["qber"]
-            
-            is_qber_abort = current_qber >= abort_threshold
-            is_noise_warning = current_qber > noise_threshold and not is_qber_abort
-            is_attack = verdict != "normal"
+                noise_threshold = self._noise_slider.value() / 1000.0
+                abort_threshold = self._abort_slider.value() / 1000.0
+                current_qber = vitals.get("qber", 0.0)
+                
+                is_qber_abort = current_qber >= abort_threshold
+                is_noise_warning = current_qber > noise_threshold and not is_qber_abort
+                is_attack = verdict != "normal"
+                is_attack_simulated = self._attack_selector.currentIndex() != 0
 
-            img_path = None
-            if not is_qber_abort and not is_noise_warning:
-                if rf_pred == "attack_blinding" and flagged:
-                    img_path = os.path.join(_PROJECT_ROOT, "Results", "Forensic_Evidence", "Evidence_Blinding_Attack_Summary.png")
-                elif rf_pred == "attack_timeshift" and flagged:
-                    img_path = os.path.join(_PROJECT_ROOT, "Results", "Forensic_Evidence", "Evidence_TimeShift_Attack_Summary.png")
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            if is_attack or is_qber_abort:
-                self._last_attack_data = {
-                    "vitals": vitals,
-                    "verdict": verdict,
-                    "rf_prediction": rf_pred,
-                    "rf_confidence": rf_conf,
-                    "svm_anomaly": svm_anomaly,
-                    "class_probs": result["class_probs"],
-                    "report": report,
-                    "image_path": img_path
-                }
+                if is_attack_simulated or is_qber_abort or is_attack:
+                    if not os.path.exists(self._telemetry_log):
+                        with open(self._telemetry_log, 'w', newline='', encoding='utf-8') as f:
+                            csv.writer(f).writerow(["Timestamp", "System_Verdict", "Detected_Signature", "Confidence", "SVM_Triggered", "Voltage", "Jitter", "QBER"])
+                    with open(self._telemetry_log, 'a', newline='', encoding='utf-8') as f:
+                        csv.writer(f).writerow([timestamp, verdict, rf_pred, f"{rf_conf:.2f}", svm_anomaly, f"{vitals.get('voltage', 0.0):.3f}", f"{vitals.get('jitter', 0.0):.3f}", f"{current_qber:.4f}"])
 
-            self._fill_bar.setValue(500)
+                if is_qber_abort:
+                    if not os.path.exists(self._abort_log):
+                        with open(self._abort_log, 'w', newline='', encoding='utf-8') as f:
+                            csv.writer(f).writerow(["Timestamp", "Event_Type", "Live_QBER", "Abort_Threshold", "Voltage", "Jitter"])
+                    with open(self._abort_log, 'a', newline='', encoding='utf-8') as f:
+                        csv.writer(f).writerow([timestamp, "QBER_ABORT", f"{current_qber:.4f}", f"{abort_threshold:.4f}", f"{vitals.get('voltage', 0.0):.3f}", f"{vitals.get('jitter', 0.0):.3f}"])
 
-            if is_qber_abort:
-                self._summary_flash_timer.stop()
-                self._status_label.setText(f"[ CRITICAL ABORT: QBER EXCEEDS {abort_threshold:.1%} ]")
-                report = f"CRITICAL SYSTEM ABORT\nLive QBER ({current_qber:.2%}) exceeds the dynamic abort threshold ({abort_threshold:.1%}).\nKey generation suspended to prevent eavesdropping."
-                if not self._header_flash_timer.isActive():
-                    self._header_flash_timer.start(400)
-            elif is_attack and is_noise_warning:
-                self._header_flash_timer.stop()
-                self._set_status_style("critical")
-                attack_name = verdict if "ZERO-DAY" in verdict else rf_pred.upper()
-                self._status_label.setText(f"[ ATTACK DETECTED: {attack_name} | + CHANNEL-DEGRADATION ]")
+                if is_noise_warning and not is_qber_abort:
+                    if not os.path.exists(self._degradation_log):
+                        with open(self._degradation_log, 'w', newline='', encoding='utf-8') as f:
+                            csv.writer(f).writerow(["Timestamp", "Warning_Type", "Live_QBER", "Noise_Threshold", "Voltage", "Jitter"])
+                    with open(self._degradation_log, 'a', newline='', encoding='utf-8') as f:
+                        csv.writer(f).writerow([timestamp, "NOISE_WARNING", f"{current_qber:.4f}", f"{noise_threshold:.4f}", f"{vitals.get('voltage', 0.0):.3f}", f"{vitals.get('jitter', 0.0):.3f}"])
+
+                img_path = None
+                if not is_qber_abort and not is_noise_warning:
+                    if "blinding" in rf_pred.lower():
+                        img_path = os.path.join(_PROJECT_ROOT, "Results", "Forensic_Evidence", "Evidence_Blinding_Attack_Summary.png")
+                    elif "timeshift" in rf_pred.lower():
+                        img_path = os.path.join(_PROJECT_ROOT, "Results", "Forensic_Evidence", "Evidence_TimeShift_Attack_Summary.png")
+
+                if is_attack or is_qber_abort or is_noise_warning:
+                    self._last_attack_data = {
+                        "vitals": vitals,
+                        "verdict": verdict,
+                        "rf_prediction": rf_pred,
+                        "rf_confidence": rf_conf,
+                        "svm_anomaly": svm_anomaly,
+                        "class_probs": class_probs,
+                        "report": report,
+                        "image_path": img_path,
+                        "is_noise_warning": is_noise_warning,
+                        "is_qber_abort": is_qber_abort
+                    }
+
+                self._fill_bar.setValue(500)
+
+                if is_qber_abort:
+                    self._summary_flash_timer.stop()
+                    self._status_label.setText(f"[ CRITICAL ABORT: QBER EXCEEDS {abort_threshold:.1%} ]")
+                    report = f"CRITICAL SYSTEM ABORT\nLive QBER ({current_qber:.2%}) exceeds the dynamic abort threshold ({abort_threshold:.1%}).\nKey generation suspended to prevent eavesdropping."
+                    if not self._header_flash_timer.isActive():
+                        self._header_flash_timer.start(400)
+                elif is_attack and is_noise_warning:
+                    self._header_flash_timer.stop()
+                    self._set_status_style("critical")
+                    attack_name = verdict if "ZERO-DAY" in verdict else rf_pred.upper()
+                    self._status_label.setText(f"[ ATTACK DETECTED: {attack_name} | + CHANNEL-DEGRADATION ]")
+                    if not self._summary_flash_timer.isActive():
+                        self._summary_flash_timer.start(400)
+                elif is_attack:
+                    self._summary_flash_timer.stop()
+                    attack_name = verdict if "ZERO-DAY" in verdict else rf_pred.upper()
+                    self._status_label.setText(f"[ ATTACK DETECTED: {attack_name} ]")
+                    if not self._header_flash_timer.isActive():
+                        self._header_flash_timer.start(400)
+                elif is_noise_warning:
+                    self._header_flash_timer.stop()
+                    self._summary_flash_timer.stop()
+                    self._set_status_style("warning")
+                    self._status_label.setText("[ WARNING: ELEVATED CHANNEL NOISE ]")
+                    report = f"ELEVATED NOISE WARNING\nLive QBER is above the expected baseline.\nThis indicates fiber degradation, temperature fluctuation, or misalignment.\nSecure key rate is degraded."
+                else:
+                    self._header_flash_timer.stop()
+                    self._summary_flash_timer.stop()
+                    self._set_status_style("normal")
+                    self._status_label.setText("[ SYSTEM SECURE ]")
+
+                self._voltage_lbl.setText(f"Voltage:  {vitals.get('voltage', 0.0):>5.2f} V")
+                self._jitter_lbl.setText( f"Jitter:   {vitals.get('jitter', 0.0):>5.2f} ns")
+                self._qber_lbl.setText(   f"QBER:     {current_qber:>5.2%}")
+
+                self._qber_history.append(current_qber)
+                self._qber_curve.setData(list(self._qber_history))
+
+                self._rf_label.setText(f"RF: {rf_pred}  ({rf_conf:.1%})")
+                
+                svm_text  = "SVM: ANOMALY ALERT" if svm_anomaly else "SVM: NORMAL"
+                svm_color = "#ff003c" if svm_anomaly else "#00ff66" 
+                self._svm_label.setText(svm_text)
+                self._svm_label.setStyleSheet(f"color: {svm_color};")
+
+                html_report = report.replace('\n', '<br>')
+                keywords_to_bold = ["FORENSIC ANALYSIS:", "CRITICAL THREAT:", "SYSTEM SECURE", "Reasoning:", "Evidence A:", "Evidence B:", "Conclusion:", "Status:", "ANOMALY:", "CRITICAL SYSTEM ABORT", "ELEVATED NOISE WARNING"]
+                for kw in keywords_to_bold:
+                    html_report = html_report.replace(kw, f"<b>{kw}</b>")
+
+                self._current_summary_html = html_report
                 if not self._summary_flash_timer.isActive():
-                    self._summary_flash_timer.start(400)
-            elif is_attack:
-                self._summary_flash_timer.stop()
-                attack_name = verdict if "ZERO-DAY" in verdict else rf_pred.upper()
-                self._status_label.setText(f"[ ATTACK DETECTED: {attack_name} ]")
-                if not self._header_flash_timer.isActive():
-                    self._header_flash_timer.start(400)
-            elif is_noise_warning:
-                self._header_flash_timer.stop()
-                self._summary_flash_timer.stop()
-                self._set_status_style("warning")
-                self._status_label.setText("[ WARNING: ELEVATED CHANNEL NOISE ]")
-                report = f"ELEVATED NOISE WARNING\nLive QBER is above the expected baseline.\nThis indicates fiber degradation, temperature fluctuation, or misalignment.\nSecure key rate is degraded."
-            else:
-                self._header_flash_timer.stop()
-                self._summary_flash_timer.stop()
-                self._set_status_style("normal")
-                self._status_label.setText("[ SYSTEM SECURE ]")
+                    text_color = "#ff003c" if (is_attack or is_qber_abort) else "#00ff66"
+                    if is_noise_warning and not is_attack and not is_qber_abort: text_color = "#fcee0a"
+                    final_html = f"<div style='color: {text_color}; font-family: Consolas; font-size: 10pt;'>{html_report}</div>"
+                    self._report_area.setHtml(final_html)
 
-            self._voltage_lbl.setText(f"Voltage:  {vitals['voltage']:>5.2f} V")
-            self._jitter_lbl.setText( f"Jitter:   {vitals['jitter']:>5.2f} ns")
-            self._qber_lbl.setText(   f"QBER:     {vitals['qber']:>5.2%}")
-
-            self._qber_history.append(vitals["qber"])
-            self._qber_curve.setData(list(self._qber_history))
-
-            self._rf_label.setText(f"RF: {rf_pred}  ({rf_conf:.1%})")
-            
-            svm_text  = "SVM: ANOMALY ALERT" if svm_anomaly else "SVM: NORMAL"
-            svm_color = "#ff003c" if svm_anomaly else "#00ff66" 
-            self._svm_label.setText(svm_text)
-            self._svm_label.setStyleSheet(f"color: {svm_color};")
-
-            html_report = report.replace('\n', '<br>')
-            keywords_to_bold = ["FORENSIC ANALYSIS:", "CRITICAL THREAT:", "SYSTEM SECURE", "Reasoning:", "Evidence A:", "Evidence B:", "Conclusion:", "Status:", "ANOMALY:", "CRITICAL SYSTEM ABORT", "ELEVATED NOISE WARNING"]
-            for kw in keywords_to_bold:
-                html_report = html_report.replace(kw, f"<b>{kw}</b>")
-
-            self._current_summary_html = html_report
-            if not self._summary_flash_timer.isActive():
-                text_color = "#ff003c" if (is_attack or is_qber_abort) else "#00ff66"
-                if is_noise_warning and not is_attack and not is_qber_abort: text_color = "#fcee0a"
-                final_html = f"<div style='color: {text_color}; font-family: Consolas; font-size: 10pt;'>{html_report}</div>"
-                self._report_area.setHtml(final_html)
-
-            if img_path and os.path.exists(img_path):
-                pixmap = QPixmap(img_path)
-                self._xai_image_label.setPixmap(pixmap.scaled(1000, 600, Qt.AspectRatioMode.KeepAspectRatio))
+                if img_path and os.path.exists(img_path):
+                    pixmap = QPixmap(img_path)
+                    self._xai_image_label.setPixmap(pixmap.scaled(1000, 600, Qt.AspectRatioMode.KeepAspectRatio))
+            except Exception as e:
+                log.error(f"Error executing logic: {e}")
 
         def closeEvent(self, event) -> None:
             self._worker.stop()
@@ -562,4 +599,4 @@ if _GUI_AVAILABLE:
         main()
 
 else:
-    log.error("Cannot launch GUI. PyQt6 and/or pyqtgraph not installed.")
+    pass

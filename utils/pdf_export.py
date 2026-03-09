@@ -18,7 +18,9 @@ def generate_incident_report(
     svm_anomaly: bool, 
     class_probs: dict, 
     report_text: str, 
-    image_path: str = None
+    image_path: str = None,
+    is_noise_warning: bool = False,
+    is_qber_abort: bool = False
 ) -> str:
     
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -78,14 +80,14 @@ def generate_incident_report(
                         Paragraph(row[7], log_style)
                     ])
 
-    verdict_color = "#ff003c" if ("ATTACK" in verdict.upper() or "ZERO-DAY" in verdict.upper() or "ABORT" in verdict.upper()) else "#00ff66"
-    if "WARNING" in verdict.upper(): verdict_color = "#fcee0a"
+    verdict_color = "#ff003c" if ("ATTACK" in verdict.upper() or "ZERO-DAY" in verdict.upper() or "ABORT" in verdict.upper() or is_qber_abort) else "#00ff66"
+    if "WARNING" in verdict.upper() or is_noise_warning: verdict_color = "#fcee0a"
 
     meta_data = [
         ["REPORT GENERATED:", f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} IST", "PROTOCOL:", "BB84 Decoy-State"],
         ["OPERATOR ID:", "Rahul Rajesh (2360445)", "WAVELENGTH:", "1550 nm (ITU-T G.652)"],
         ["SESSION EVENTS:", str(total_events), "THREATS LOGGED:", str(attack_events)],
-        ["SYSTEM VERDICT:", Paragraph(f"<b><font color='{verdict_color}'>{verdict.upper()}</font></b>", normal_style), "CRYPTO STATUS:", "KEY MATERIAL FLUSHED" if attack_events > 0 else "NOMINAL"]
+        ["SYSTEM VERDICT:", Paragraph(f"<b><font color='{verdict_color}'>{verdict.upper()}</font></b>", normal_style), "CRYPTO STATUS:", "KEY MATERIAL FLUSHED" if (attack_events > 0 or is_qber_abort) else "NOMINAL"]
     ]
     
     meta_table = Table(meta_data, colWidths=[1.5*inch, 2.5*inch, 1.3*inch, 2.3*inch])
@@ -96,7 +98,7 @@ def generate_incident_report(
         ('TEXTCOLOR', (2,0), (2,-1), colors.HexColor("#555555")),
         ('TEXTCOLOR', (1,0), (1,2), colors.black),
         ('TEXTCOLOR', (3,0), (3,2), colors.black),
-        ('TEXTCOLOR', (3,3), (3,3), colors.HexColor("#ff003c") if attack_events > 0 else colors.HexColor("#00ff66")),
+        ('TEXTCOLOR', (3,3), (3,3), colors.HexColor("#ff003c") if (attack_events > 0 or is_qber_abort) else colors.HexColor("#00ff66")),
         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
         ('BOTTOMPADDING', (0,0), (-1,-1), 4),
         ('TOPPADDING', (0,0), (-1,-1), 4),
@@ -147,11 +149,14 @@ def generate_incident_report(
     j_dev = j_val - 1.20
     q_dev = (q_val * 100) - 2.50
 
+    qber_status = "CRITICAL ABORT" if is_qber_abort else ("NOISE WARNING" if is_noise_warning else "NOMINAL")
+    qber_font_color = "#ff003c" if is_qber_abort else ("#b3a000" if is_noise_warning else "#00ff66")
+
     telemetry_data = [
-        ["Metric", "Observed Value", "Nominal Baseline", "Calculated Deviation Δ"],
-        ["Detector Bias Voltage", f"{v_val:.2f} V", "3.30 V", f"{v_dev:+.2f} V"],
-        ["Avalanche Timing Jitter", f"{j_val:.3f} ns", "1.200 ns", f"{j_dev:+.3f} ns"],
-        ["Quantum Bit Error Rate", f"{q_val * 100:.2f}%", "2.50%", f"{q_dev:+.2f}%"]
+        ["Metric", "Observed Value", "Calculated Deviation Δ", "Threshold Status"],
+        ["Detector Bias Voltage", f"{v_val:.2f} V", f"{v_dev:+.2f} V", "N/A"],
+        ["Avalanche Timing Jitter", f"{j_val:.3f} ns", f"{j_dev:+.3f} ns", "N/A"],
+        ["Quantum Bit Error Rate", f"{q_val * 100:.2f}%", f"{q_dev:+.2f}%", Paragraph(f"<b><font color='{qber_font_color}'>{qber_status}</font></b>", normal_style)]
     ]
     tel_table = Table(telemetry_data, colWidths=[2.2*inch, 1.8*inch, 1.8*inch, 1.8*inch])
     tel_table.setStyle(TableStyle([
